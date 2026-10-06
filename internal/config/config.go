@@ -1,3 +1,4 @@
+// Package config loads, validates, and persists proxy configuration.
 package config
 
 import (
@@ -11,10 +12,14 @@ import (
 	"strings"
 )
 
+// Config holds listener settings, client authentication, Google credentials,
+// and Antigravity project and endpoint settings.
 type Config struct {
-	Port          int    `json:"port"`
-	Host          string `json:"host"`
-	APIKey        string `json:"apiKey,omitempty"`
+	Port int    `json:"port"`
+	Host string `json:"host"`
+	// APIKey authenticates proxy clients, not requests to Google.
+	APIKey string `json:"apiKey,omitempty"`
+	// AccessToken takes precedence over RefreshToken and is not refreshed.
 	AccessToken   string `json:"accessToken,omitempty"`
 	RefreshToken  string `json:"refreshToken,omitempty"`
 	ProjectID     string `json:"projectId,omitempty"`
@@ -30,6 +35,9 @@ func configPath() (string, error) {
 	return filepath.Join(home, ".config", "antigravity-proxy", "config.json"), nil
 }
 
+// Load reads ~/.config/antigravity-proxy/config.json, applies defaults and
+// environment overrides, and validates listener and upstream settings.
+// It returns the configuration and its persistence path; a missing file is allowed.
 func Load() (Config, string, error) {
 	path, err := configPath()
 	if err != nil {
@@ -121,6 +129,8 @@ func validateCloudEndpoint(name, endpoint string) error {
 	return fmt.Errorf("%s must use HTTPS; plain HTTP is allowed only for localhost/loopback testing", name)
 }
 
+// Save writes cfg through a same-directory temporary file and renames it over
+// path. Newly created directories and files use owner-only permissions.
 func Save(path string, cfg Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return fmt.Errorf("create config directory: %w", err)

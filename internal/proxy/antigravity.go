@@ -20,6 +20,8 @@ import (
 
 const defaultProjectID = "rising-fact-p41fc"
 
+// Proxy serves native Gemini requests and the raw Antigravity model catalog
+// for one Google account. Its token and project caches support concurrent handlers.
 type Proxy struct {
 	cfg    config.Config
 	client *http.Client
@@ -37,11 +39,13 @@ type upstreamError struct {
 	Body   string
 }
 
+// Error reports the upstream HTTP status and response body.
 func (e *upstreamError) Error() string {
 	return fmt.Sprintf("Antigravity returned HTTP %d: %s", e.Status, e.Body)
 }
 
-// New creates a Gemini upstream proxy with the supplied configuration.
+// New creates a Gemini upstream proxy with cfg without contacting Google.
+// It does not validate cfg; normal startup obtains it through config.Load.
 func New(cfg config.Config) *Proxy {
 	return &Proxy{
 		cfg:       cfg,
@@ -50,6 +54,8 @@ func New(cfg config.Config) *Proxy {
 	}
 }
 
+// accessToken uses an explicit access token unchanged, or serializes refreshes
+// and caches the result until shortly before its reported expiry.
 func (p *Proxy) accessToken(ctx context.Context) (string, error) {
 	if p.cfg.AccessToken != "" {
 		return p.cfg.AccessToken, nil

@@ -73,6 +73,7 @@ func (p *Proxy) handleGenerateContent(w http.ResponseWriter, r *http.Request, mo
 	if stream {
 		path, accept = "/v1internal:streamGenerateContent?alt=sse", "text/event-stream"
 	}
+	// Carry caller cancellation into the upstream transport, including body reads.
 	resp, err := p.postToAntigravity(r.Context(), token, path, accept, payload)
 	if err != nil {
 		writeGeminiUpstreamError(w, err)
@@ -211,8 +212,9 @@ func encodeGenerationSSEEvent(event generationSSEEvent, data []byte) []byte {
 	return frame.Bytes()
 }
 
-// Completion metadata is observed without rewriting payloads. A clean transport
-// EOF or [DONE] is not proof that native candidate generation actually finished.
+// generationStreamCompletion observes native metadata without rewriting payloads.
+// Completion requires all observed candidates to finish, a native error, or a
+// blocked prompt with no candidates; EOF and [DONE] are transport-only markers.
 type generationStreamCompletion struct {
 	candidates  map[int]bool
 	nativeError bool
@@ -270,6 +272,8 @@ func (completion *generationStreamCompletion) complete() bool {
 func forwardGenerationStream(w http.ResponseWriter, body io.Reader) {
 	reader := bufio.NewReader(body)
 	controller := http.NewResponseController(w)
+	// Delay SSE headers until the first valid JSON event so early failures retain
+	// an HTTP error status.
 	committed := false
 	var completion generationStreamCompletion
 	var pending bytes.Buffer

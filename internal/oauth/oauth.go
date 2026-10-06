@@ -1,3 +1,5 @@
+// Package oauth handles Google authorization and token exchange using
+// runtime-provided OAuth client credentials.
 package oauth
 
 import (
@@ -47,8 +49,9 @@ var oauthScopes = []string{
 type Tokens struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
-	ExpiresIn    int64  `json:"expires_in"`
-	TokenType    string `json:"token_type"`
+	// ExpiresIn is the access-token lifetime in seconds reported by Google.
+	ExpiresIn int64  `json:"expires_in"`
+	TokenType string `json:"token_type"`
 }
 
 func listenOAuthCallbackPort() (net.Listener, int, error) {
@@ -76,7 +79,11 @@ func listenOAuthCallbackPort() (net.Listener, int, error) {
 	return nil, 0, fmt.Errorf("could not bind OAuth callback port (tried %v): %w", ports, lastErr)
 }
 
-// Login authorizes Google credentials through a local callback and saves them.
+// Login authorizes Google credentials through a loopback callback using PKCE
+// and state validation, then saves them to path while preserving other cfg settings.
+// Client credentials come from ANTIGRAVITY_OAUTH_CLIENT_ID and
+// ANTIGRAVITY_OAUTH_CLIENT_SECRET. It prefers saving a refresh token; if none
+// is returned, it saves the expiring access token instead.
 func Login(cfg config.Config, path string) error {
 	clientID, clientSecret, err := oauthClientCredentials()
 	if err != nil {
@@ -222,7 +229,8 @@ func exchangeOAuthCode(ctx context.Context, code, verifier, redirectURI, clientI
 	return tokens, nil
 }
 
-// Refresh exchanges a refresh token for Google OAuth credentials.
+// Refresh exchanges refreshToken using the runtime OAuth client credentials.
+// The request is bound to ctx; returned tokens are not saved to configuration.
 func Refresh(ctx context.Context, refreshToken string) (Tokens, error) {
 	clientID, clientSecret, err := oauthClientCredentials()
 	if err != nil {

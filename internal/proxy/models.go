@@ -13,6 +13,8 @@ import (
 	"strings"
 )
 
+// antigravityModelMetadata supplies public-model eligibility; model ID names do
+// not determine inclusion. Token limits stay raw and descriptive, not request caps.
 type antigravityModelMetadata struct {
 	APIProvider              string          `json:"apiProvider"`
 	IsInternal               bool            `json:"isInternal"`
@@ -37,6 +39,9 @@ type geminiModelList struct {
 	NextPageToken string        `json:"nextPageToken,omitempty"`
 }
 
+// geminiModelCursor stores the last sorted name and effective page size, not an
+// offset. Each page refreshes the catalog, which may add or remove entries;
+// keyset pagination gives forward-only progress, not a stable snapshot.
 type geminiModelCursor struct {
 	Version  int    `json:"version"`
 	After    string `json:"after"`

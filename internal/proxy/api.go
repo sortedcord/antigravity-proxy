@@ -1,3 +1,4 @@
+// Package proxy exposes native Gemini APIs backed by Google Antigravity.
 package proxy
 
 import (
@@ -9,6 +10,9 @@ import (
 	"strings"
 )
 
+// ServeHTTP serves local health, model discovery, and native Gemini generation.
+// Health is unauthenticated and does not probe Google; other supported routes
+// require the local API key when one is configured.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/health" && r.Method == http.MethodGet:
@@ -28,6 +32,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// authorized checks the local proxy key, not Google's OAuth credential.
+// The first nonempty credential source wins; a mismatch does not fall back
+// to another header or query parameter.
 func (p *Proxy) authorized(w http.ResponseWriter, r *http.Request) bool {
 	if p.cfg.APIKey == "" {
 		return true
@@ -160,6 +167,8 @@ func writeGeminiError(w http.ResponseWriter, code int, message string) {
 	writeJSON(w, code, map[string]any{"error": map[string]any{"code": code, "message": message, "status": status}})
 }
 
+// writeGeminiUpstreamError preserves Google's structured error and HTTP status
+// when available, rather than discarding provider-specific error details.
 func writeGeminiUpstreamError(w http.ResponseWriter, err error) {
 	status := http.StatusBadGateway
 	var upstream *upstreamError
