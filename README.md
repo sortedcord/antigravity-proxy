@@ -1,8 +1,16 @@
-# Antigravity Proxy (Go)
+<div align="center">
+<img src="docs/assets/antigravity_proxy_logo.webp" alt="antigravity proxy logo">
+<br>
+<b>Gemini ain't shit. Antigravity is.</b>
+</div>
 
-A single-account bridge from the native Gemini API to Antigravity Cloud Code, using server-side Google OAuth. It exposes model discovery, `generateContent`, and SSE streaming so Bifrost can use its native Gemini provider. It does not expose Anthropic or OpenAI API endpoints.
+---
 
-> **Account risk:** This is an unofficial integration with internal Cloud Code endpoints. Google may enforce its terms, including account suspension. Use an account you can afford to lose. This project is not endorsed by Google.
+A bridge from the native Gemini API to Antigravity, using server-side Google OAuth. Built for Bifrost and more~
+
+In other words, Antigravity Proxy allows you to use Gemini models in applications other than Antigravity, like pi, deepseek harness, hermes, etc.
+
+> **Account risk:** This is an unofficial integration with internal Antigravity endpoints. Google may enforce its terms, including account suspension. Use an account you can afford to lose. This project is not endorsed by Google.
 
 ## Build and run
 
@@ -34,6 +42,85 @@ API_KEY='replace-with-a-long-random-value' HOST=0.0.0.0 ./antigravity-proxy serv
 ```
 
 Startup rejects a non-loopback `HOST` unless `API_KEY` is set. When configured, the local API key protects `/models` and every `/v1beta` endpoint. Send it in `x-api-key` or `Authorization: Bearer ...`; native Gemini endpoints also accept `x-goog-api-key` or the `key` query parameter. An unset key disables API-key authentication. `/health` remains unauthenticated and does not disclose credentials. This local key is never sent upstream: Cloud Code uses the service's Google OAuth credential.
+
+## Docker
+
+Build the image from the repository root:
+
+```sh
+docker build -t antigravity-proxy .
+```
+
+The multi-stage build produces a static Go executable. The minimal `scratch` runtime contains the executable and trusted CA certificates, runs as non-root UID/GID `10001:10001`, and has no shell, compiler, or `curl`. Its default command is `serve`; pass `login` explicitly to run OAuth login. Serving supports a read-only root filesystem and does not persist refreshed access tokens; only `login` writes the config file.
+
+Credentials belong at runtime, never in the image or build arguments. The `.dockerignore` allowlist excludes `.env` files, config files, Git history, assets, and local binaries from the build context. Do not add secrets to source files or otherwise include them in the build context.
+
+### Serve with runtime environment variables
+
+Export a long, random local `API_KEY`, your Google `ANTIGRAVITY_REFRESH_TOKEN`, and `ANTIGRAVITY_OAUTH_CLIENT_ID` / `ANTIGRAVITY_OAUTH_CLIENT_SECRET` from your secret source before running this example. The OAuth client must be the one that issued the refresh token; the local API key is a separate secret and is not sent to Google.
+
+```sh
+: "${API_KEY:?Set a long random local API key}"
+: "${ANTIGRAVITY_REFRESH_TOKEN:?Set your Google refresh token}"
+: "${ANTIGRAVITY_OAUTH_CLIENT_ID:?Set the matching Google OAuth client ID}"
+: "${ANTIGRAVITY_OAUTH_CLIENT_SECRET:?Set the matching Google OAuth client secret}"
+export API_KEY ANTIGRAVITY_REFRESH_TOKEN ANTIGRAVITY_OAUTH_CLIENT_ID ANTIGRAVITY_OAUTH_CLIENT_SECRET
+
+docker run --rm --name antigravity-proxy \
+  --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  -p 127.0.0.1:8081:8080 \
+  -e API_KEY \
+  -e ANTIGRAVITY_REFRESH_TOKEN \
+  -e ANTIGRAVITY_OAUTH_CLIENT_ID \
+  -e ANTIGRAVITY_OAUTH_CLIENT_SECRET \
+  antigravity-proxy
+```
+
+Unlike the host executable, the image defaults to `HOST=0.0.0.0` and `PORT=8080` so Docker can reach the listener inside the container. `API_KEY` is therefore required: startup rejects this non-loopback listener without it, even if the published host port is loopback-only. The mapping above exposes container port `8080` at host `127.0.0.1:8081`; it does not change the container's `PORT`. Keep host publication loopback-only unless you intentionally configure secure remote access.
+
+Check local health from the host with `curl http://127.0.0.1:8081/health`. For protected routes, send the same `API_KEY` in a supported authentication header. A directly supplied `ANTIGRAVITY_ACCESS_TOKEN` can replace the refresh-token flow, but it expires and is not refreshed automatically. Environment variables are visible to users with Docker access; keep that access restricted.
+
+### Use an existing login config
+
+The recommended login flow is to set the Google OAuth client variables and run `./antigravity-proxy login` on the host as described above. Then mount the resulting config directory read-only for serving instead of passing `ANTIGRAVITY_REFRESH_TOKEN`. The OAuth client variables are still required at runtime to refresh the saved token.
+
+On native Linux with rootful Docker and no user-namespace remapping, run as your host UID/GID so the container can read the owner-only (`0600`) config file:
+
+```sh
+docker run --rm --name antigravity-proxy \
+  --user "$(id -u):$(id -g)" \
+  --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  --mount type=bind,src="$HOME/.config/antigravity-proxy",dst=/home/app/.config/antigravity-proxy,readonly \
+  -p 127.0.0.1:8081:8080 \
+  -e API_KEY \
+  -e ANTIGRAVITY_OAUTH_CLIENT_ID \
+  -e ANTIGRAVITY_OAUTH_CLIENT_SECRET \
+  antigravity-proxy
+```
+
+The image keeps `HOME=/home/app` even when `--user` overrides its numeric identity. Rootless Docker and user-namespace remapping map host owners differently: use runtime token environment variables or a named volume owned by the appropriately mapped container user instead. Do not make credential files world-readable to work around ownership.
+
+Container login is optional. The OAuth callback binds to container loopback (`127.0.0.1`), so publishing `-p 51121:51121` on a bridge network does **not** make it reachable from the host browser. On native Linux with rootful Docker and no user-namespace remapping, host networking shares the host loopback and permits this alternative (with exported Google OAuth client variables):
+
+```sh
+mkdir -p "$HOME/.config/antigravity-proxy"
+docker run --rm --network host \
+  --user "$(id -u):$(id -g)" \
+  --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  --mount type=bind,src="$HOME/.config/antigravity-proxy",dst=/home/app/.config/antigravity-proxy \
+  -e HOST=127.0.0.1 \
+  -e ANTIGRAVITY_OAUTH_CLIENT_ID \
+  -e ANTIGRAVITY_OAUTH_CLIENT_SECRET \
+  antigravity-proxy login
+```
+
+The login mount is writable so the token can be saved; switch back to the read-only serving mount afterward. Follow the authorization URL printed by `login` in your host browser. Do not assume this host-network callback flow is portable to Docker Desktop; host login is the recommended option.
+
+### Connect Bifrost
+
+Use Bifrost's built-in Gemini provider and the configuration in [Bifrost setup](#bifrost-setup). With the host-port mapping above, a Bifrost process on the host uses `http://127.0.0.1:8081/v1beta`. Set Bifrost's `ANTIGRAVITY_PROXY_API_KEY` to the same value as the container's `API_KEY` and retain the `env.ANTIGRAVITY_PROXY_API_KEY` provider key reference.
+
+If Bifrost is also containerized, attach both containers to the same user-defined Docker network (create one with `docker network create antigravity` and add `--network antigravity` to the proxy run). Use `http://antigravity-proxy:8080/v1beta` as Bifrost's provider base URL, using the proxy's container name and internal port, not Bifrost's own `localhost` or the published host port. Host publication is optional for this container-to-container path. If your Bifrost deployment blocks private-network provider destinations, allow this trusted destination through its private-network access controls; consult the [Bifrost provider configuration](https://docs.getbifrost.ai/quickstart/gateway/provider-configuration) for your installed version. In either topology, `/v1beta` and the matching local API key are required.
 
 ## Endpoints
 
