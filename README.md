@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/assets/antigravity_proxy_logo.webp" alt="Antigravity Proxy Logo" width="300">
+  <img src="docs/assets/antigravity_proxy_logo.webp" alt="Antigravity Proxy Logo">
   <p><b>Antigravity is shit. Gemini isn't.</b></p>
 </div>
 
