@@ -14,7 +14,7 @@ import (
 func TestReloadedHistoryRemainsAvailableDuringFirstFetch(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "history")
 	stored := observation(observationTime(), 0.6)
-	initial, err := Open(path, time.Second, func(context.Context) (quota.Snapshot, error) { return stored, nil })
+	initial, err := Open(path, time.Second, 0, func(context.Context) (quota.Snapshot, error) { return stored, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestAmountOnlyAndUnusableWindowsPersistWithoutFabricatedPercentages(t *test
 	sample.Pools.Gemini.Weekly = quota.Window{BucketID: "gemini-weekly", Window: "weekly", Status: "available", RemainingAmount: &amount}
 	sample.Pools.ThirdParty.FiveHour = quota.Window{BucketID: "3p-5h", Window: "5h", Status: "unavailable", ResetAt: sample.Pools.ThirdParty.FiveHour.ResetAt, UnavailableReason: "invalid_remaining_fraction"}
 	sample.Pools.ThirdParty.Weekly = quota.Window{BucketID: "3p-weekly", Window: "weekly", Status: "disabled", Disabled: true, ResetAt: sample.Pools.ThirdParty.Weekly.ResetAt, UnavailableReason: "upstream_disabled"}
-	c, err := Open(path, time.Second, func(context.Context) (quota.Snapshot, error) { return sample, nil })
+	c, err := Open(path, time.Second, 0, func(context.Context) (quota.Snapshot, error) { return sample, nil })
 	if err != nil {
 		t.Fatal(err)
 	}

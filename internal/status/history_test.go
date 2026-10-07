@@ -31,7 +31,7 @@ func observationTime() time.Time { return time.Date(2026, 10, 6, 12, 0, 0, 0, ti
 
 func openTestCollector(t *testing.T, path string, interval time.Duration, fetch FetchFunc) *Collector {
 	t.Helper()
-	c, err := Open(path, interval, fetch)
+	c, err := Open(path, interval, 0, fetch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestRestartReloadsDurableSnapshotAndPollingTime(t *testing.T) {
 	first := observation(observationTime(), 0.8)
 	last := observation(observationTime().Add(time.Minute), 0.2)
 	calls := 0
-	c, err := Open(path, 300*time.Second, func(context.Context) (quota.Snapshot, error) {
+	c, err := Open(path, 300*time.Second, 0, func(context.Context) (quota.Snapshot, error) {
 		calls++
 		if calls == 1 {
 			return first, nil
@@ -294,7 +294,7 @@ func TestOpenRejectsInvalidStorageAndIntervals(t *testing.T) {
 		{"empty path", "", time.Second, fetch}, {"blank path", "  ", time.Second, fetch}, {"zero interval", filepath.Join(dir, "zero"), 0, fetch}, {"negative interval", filepath.Join(dir, "negative"), -time.Second, fetch}, {"nil fetch", filepath.Join(dir, "nil"), time.Second, nil}, {"directory file", dir, time.Second, fetch},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if c, err := Open(test.path, test.interval, test.fetch); err == nil {
+			if c, err := Open(test.path, test.interval, 0, test.fetch); err == nil {
 				c.Close()
 				t.Fatal("Open unexpectedly succeeded")
 			}
@@ -304,7 +304,7 @@ func TestOpenRejectsInvalidStorageAndIntervals(t *testing.T) {
 	if err := os.WriteFile(blocked, []byte("not a directory"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if c, err := Open(filepath.Join(blocked, "usage"), time.Second, fetch); err == nil {
+	if c, err := Open(filepath.Join(blocked, "usage"), time.Second, 0, fetch); err == nil {
 		c.Close()
 		t.Fatal("Open accepted non-directory parent")
 	}
@@ -312,12 +312,12 @@ func TestOpenRejectsInvalidStorageAndIntervals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, content := range []string{"{broken}\n", "{}\n", string(valid), string(valid) + "\n\n", string(valid) + "\n{partial"} {
+	for _, content := range []string{"{broken}\n", "{}\n", string(valid) + "\n\n", "{broken}\n" + string(valid)} {
 		path := filepath.Join(t.TempDir(), "corrupt")
 		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if c, err := Open(path, time.Second, fetch); err == nil {
+		if c, err := Open(path, time.Second, 0, fetch); err == nil {
 			c.Close()
 			t.Fatalf("Open accepted corrupt history %q", content)
 		}

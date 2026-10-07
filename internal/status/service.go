@@ -20,6 +20,7 @@ import (
 type Service struct {
 	historyPath     string
 	intervalSeconds int
+	maxSamples      int
 	fetch           FetchFunc
 	mu              sync.RWMutex
 	collector       *Collector
@@ -27,7 +28,7 @@ type Service struct {
 
 // NewService configures status without starting work or opening history files.
 func NewService(cfg config.Config, fetch FetchFunc) *Service {
-	return &Service{historyPath: cfg.QuotaHistoryPath, intervalSeconds: cfg.QuotaPollIntervalSeconds, fetch: fetch}
+	return &Service{historyPath: cfg.QuotaHistoryPath, intervalSeconds: cfg.QuotaPollIntervalSeconds, maxSamples: cfg.QuotaHistoryMaxSamples, fetch: fetch}
 }
 
 // Start opens persistent quota history and starts account-scoped polling.
@@ -45,7 +46,7 @@ func (s *Service) Start(ctx context.Context) error {
 	if seconds < 1 || int64(seconds) > int64(1<<63-1)/int64(time.Second) {
 		return errors.New("quota polling interval is outside the supported duration range")
 	}
-	collector, err := Open(s.historyPath, time.Duration(seconds)*time.Second, s.fetch)
+	collector, err := Open(s.historyPath, time.Duration(seconds)*time.Second, s.maxSamples, s.fetch)
 	if err != nil {
 		return fmt.Errorf("open quota history: %w", err)
 	}
@@ -100,7 +101,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": message, "polling": polling})
 			return
 		}
-		stale := polling.LastError != "" || time.Since(snapshot.ObservedAt) > time.Duration(polling.IntervalSeconds)*time.Second
+		stale := snapshotStale(snapshot.ObservedAt, collector.interval, polling.LastError, time.Now())
 		writeJSON(w, http.StatusOK, struct {
 			quota.Snapshot
 			Polling PollInfo `json:"polling"`
@@ -123,6 +124,12 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Result
 		Polling PollInfo `json:"polling"`
 	}{Result: result, Polling: polling})
+}
+
+// snapshotStale allows two full polling intervals for an observation to land.
+// Adding the intervals separately avoids overflowing a doubled Duration.
+func snapshotStale(observedAt time.Time, interval time.Duration, lastError string, now time.Time) bool {
+	return lastError != "" || now.After(observedAt.Add(interval).Add(interval))
 }
 
 func parseUsageQuery(raw string) (Query, error) {

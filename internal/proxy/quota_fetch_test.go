@@ -23,8 +23,7 @@ const quotaTestResponse = `{"groups":[
 	{"displayName":"Gemini Models","buckets":[{"bucketId":"gemini-weekly","remainingFraction":0.8},{"bucketId":"gemini-5h","remainingFraction":0}]},
 	{"displayName":"Claude and GPT models","buckets":[{"bucketId":"3p-weekly","remainingFraction":0.6},{"bucketId":"3p-5h","remainingFraction":0.4}]}]}`
 
-func TestFetchQuotaSnapshotUsesHubIdentityWithoutProvisioning(t *testing.T) {
-	t.Setenv("ANTIGRAVITY_CLIENT_VERSION", "native-test-version")
+func TestFetchQuotaSnapshotUsesUnifiedIdentityWithoutProvisioning(t *testing.T) {
 	for _, project := range []string{"", "configured-project", "cached-project"} {
 		t.Run(project, func(t *testing.T) {
 			var requests atomic.Int32
@@ -38,10 +37,10 @@ func TestFetchQuotaSnapshotUsesHubIdentityWithoutProvisioning(t *testing.T) {
 				if r.Header.Get("Authorization") != "Bearer quota-test-token" {
 					t.Error("quota did not reuse configured account token")
 				}
-				if got, want := r.Header.Get("User-Agent"), fmt.Sprintf("antigravity/hub/2.9.1 %s/%s", runtime.GOOS, runtime.GOARCH); got != want {
+				if got, want := r.Header.Get("User-Agent"), fmt.Sprintf("antigravity/native-test-version %s/%s", runtime.GOOS, runtime.GOARCH); got != want {
 					t.Errorf("quota user agent = %q, want %q", got, want)
 				}
-				if r.Header.Get("Content-Type") != "application/json" || r.Header.Get("Accept") != "application/json" || r.Header.Get("X-Client-Version") != "native-test-version" {
+				if r.Header.Get("Content-Type") != "application/json" || r.Header.Get("Accept") != "application/json" || r.Header.Get("X-Client-Version") != "native-test-version" || r.Header.Get("X-Goog-Api-Client") != "" {
 					t.Error("quota did not retain normal non-UA transport headers")
 				}
 				var payload map[string]string
@@ -55,7 +54,7 @@ func TestFetchQuotaSnapshotUsesHubIdentityWithoutProvisioning(t *testing.T) {
 				_, _ = io.WriteString(w, quotaTestResponse)
 			}))
 			defer upstream.Close()
-			cfg := config.Config{AccessToken: "quota-test-token", DailyEndpoint: upstream.URL, ProdEndpoint: upstream.URL}
+			cfg := config.Config{AccessToken: "quota-test-token", DailyEndpoint: upstream.URL, ProdEndpoint: upstream.URL, ClientVersion: "native-test-version"}
 			if project == "configured-project" {
 				cfg.ProjectID = project
 			}
@@ -85,7 +84,6 @@ func TestFetchQuotaSnapshotUsesHubIdentityWithoutProvisioning(t *testing.T) {
 }
 
 func TestQuotaIdentityDoesNotChangeNativeTransport(t *testing.T) {
-	t.Setenv("ANTIGRAVITY_CLIENT_VERSION", "custom-native-version")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("User-Agent") != fmt.Sprintf("antigravity/custom-native-version %s/%s", runtime.GOOS, runtime.GOARCH) || r.Header.Get("X-Client-Version") != "custom-native-version" || r.Header.Get("Accept") != "text/event-stream" {
 			t.Error("non-quota native headers changed")
@@ -93,8 +91,8 @@ func TestQuotaIdentityDoesNotChangeNativeTransport(t *testing.T) {
 		_, _ = io.WriteString(w, "{}")
 	}))
 	defer upstream.Close()
-	p := New(config.Config{DailyEndpoint: upstream.URL, ProdEndpoint: upstream.URL})
-	resp, err := p.postToAntigravity(context.Background(), "native-test-token", "/v1internal:streamGenerateContent", "text/event-stream", "", map[string]string{})
+	p := New(config.Config{DailyEndpoint: upstream.URL, ProdEndpoint: upstream.URL, ClientVersion: "custom-native-version"})
+	resp, err := p.postToAntigravity(context.Background(), "native-test-token", "/v1internal:streamGenerateContent", "text/event-stream", map[string]string{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +312,7 @@ func TestQuotaCollectorCloseDoesNotWaitForUnrelatedTokenRefresh(t *testing.T) {
 	defer upstream.Close()
 	p := New(config.Config{RefreshToken: "unrelated-refresh-token", DailyEndpoint: upstream.URL, ProdEndpoint: upstream.URL})
 	started := make(chan struct{})
-	collector, err := quotastatus.Open(t.TempDir()+"/history.jsonl", time.Hour, func(ctx context.Context) (quota.Snapshot, error) {
+	collector, err := quotastatus.Open(t.TempDir()+"/history.jsonl", time.Hour, 0, func(ctx context.Context) (quota.Snapshot, error) {
 		close(started)
 		return p.QuotaFetcher().Fetch(ctx)
 	})

@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"antigravity-proxy/internal/config"
 )
@@ -51,6 +52,15 @@ func catalogTestRequest(p *Proxy, path string) *httptest.ResponseRecorder {
 	response := httptest.NewRecorder()
 	p.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 	return response
+}
+
+// catalogTestClock drives the production TTL without sleeping or mutating
+// cached entries. Install it before serving any requests.
+func catalogTestClock(p *Proxy) func(time.Duration) {
+	now := time.Now()
+	var elapsed atomic.Int64
+	p.catalog.clock = func() time.Time { return now.Add(time.Duration(elapsed.Load())) }
+	return func(delta time.Duration) { elapsed.Add(int64(delta)) }
 }
 
 func readCatalogTestList(t *testing.T, p *Proxy, query string) catalogTestList {
@@ -170,6 +180,7 @@ func TestGeminiCatalogPaginationRoundTripAndCatalogChanges(t *testing.T) {
 		"model-002":{"apiProvider":"API_PROVIDER_GOOGLE_GEMINI"}
 	}}`)
 	p := newCatalogTestProxy(t, func() string { return catalog.Load().(string) })
+	advance := catalogTestClock(p)
 	first := readCatalogTestList(t, p, "?pageSize=2")
 	if got, want := catalogTestNames(t, first), []string{"models/model-001", "models/model-002"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("first page = %v, want %v", got, want)
@@ -189,6 +200,7 @@ func TestGeminiCatalogPaginationRoundTripAndCatalogChanges(t *testing.T) {
 		"model-004":{"apiProvider":"API_PROVIDER_GOOGLE_GEMINI"},
 		"model-005":{"apiProvider":"API_PROVIDER_GOOGLE_GEMINI"}
 	}}`)
+	advance(modelCatalogTTL)
 	second := readCatalogTestList(t, p, "?pageSize=2&pageToken="+url.QueryEscape(first.NextPageToken))
 	if got, want := catalogTestNames(t, second), []string{"models/model-003", "models/model-004"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("second page = %v, want %v", got, want)
@@ -265,6 +277,7 @@ func TestGeminiCatalogGetUsesCurrentMetadataAndMissingIs404(t *testing.T) {
 	var catalog atomic.Value
 	catalog.Store(`{"models":{"future-native-id":{"apiProvider":"API_PROVIDER_GOOGLE_GEMINI","displayName":"First catalog","maxTokens":8123},"claude-example":{"apiProvider":"API_PROVIDER_ANTHROPIC_VERTEX"},"internal-model":{"apiProvider":"API_PROVIDER_INTERNAL"}}}`)
 	p := newCatalogTestProxy(t, func() string { return catalog.Load().(string) })
+	advance := catalogTestClock(p)
 	claudeResponse := catalogTestRequest(p, "/v1beta/models/claude-example")
 	if claudeResponse.Code != http.StatusOK {
 		t.Fatalf("native Claude get status = %d: %s", claudeResponse.Code, claudeResponse.Body.String())
@@ -297,6 +310,7 @@ func TestGeminiCatalogGetUsesCurrentMetadataAndMissingIs404(t *testing.T) {
 			t.Fatalf("get inputTokenLimit = %s, want %s", got, expected.inputLimit)
 		}
 		catalog.Store(`{"models":{"future-native-id":{"apiProvider":"API_PROVIDER_GOOGLE_GEMINI","displayName":"Updated catalog","maxTokens":9147}}}`)
+		advance(modelCatalogTTL)
 	}
 }
 

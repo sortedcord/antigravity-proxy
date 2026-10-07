@@ -1,0 +1,7 @@
+/antigravity-proxy
+/antigravity-proxy.exe
+/.codegraph/
+*.test
+/coverage.out
+.env
+.env.*

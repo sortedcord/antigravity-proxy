@@ -82,7 +82,7 @@ func listenOAuthCallbackPort() (net.Listener, int, error) {
 }
 
 // Login authorizes Google credentials through a loopback callback using PKCE
-// and state validation, then saves them to path while preserving other cfg settings.
+// and state validation, then saves them to path while preserving other disk settings.
 // A configured client pair takes precedence over credentials extracted from
 // installed agy or a checksum-verified official download. The exact pair is
 // saved with the resulting tokens; no CLI code or installer is executed.
@@ -102,7 +102,7 @@ func login(cfg config.Config, path string, output io.Writer) error {
 		return err
 	}
 	defer listener.Close()
-	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", callbackPort)
+	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/oauth-callback", callbackPort)
 
 	stateBytes := make([]byte, 24)
 	verifierBytes := make([]byte, 32)
@@ -143,16 +143,12 @@ func login(cfg config.Config, path string, output io.Writer) error {
 		}
 		if received := r.URL.Query().Get("state"); received != state {
 			http.Error(w, "OAuth state mismatch", http.StatusBadRequest)
-			select {
-			case result <- callback{err: errors.New("OAuth state mismatch")}:
-			default:
-			}
 			return
 		}
 		if oauthErr := r.URL.Query().Get("error"); oauthErr != "" {
-			_, _ = io.WriteString(w, "Authorization failed. You may close this tab.\n")
+			http.Error(w, "Authorization failed. You may close this tab.", http.StatusBadRequest)
 			select {
-			case result <- callback{err: fmt.Errorf("Google authorization failed: %s", oauthErr)}:
+			case result <- callback{err: errors.New("Google authorization failed")}:
 			default:
 			}
 			return
@@ -191,7 +187,7 @@ func login(cfg config.Config, path string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := saveLoginTokens(cfg, path, tokens, clientID, clientSecret); err != nil {
+	if err := saveLoginTokens(path, tokens, clientID, clientSecret); err != nil {
 		return err
 	}
 	if tokens.RefreshToken == "" {
@@ -201,17 +197,15 @@ func login(cfg config.Config, path string, output io.Writer) error {
 	return nil
 }
 
-func saveLoginTokens(cfg config.Config, path string, tokens Tokens, clientID, clientSecret string) error {
+func saveLoginTokens(path string, tokens Tokens, clientID, clientSecret string) error {
 	if tokens.AccessToken == "" {
 		return errors.New("Google returned no access token")
 	}
-	cfg.OAuthClientID, cfg.OAuthClientSecret = clientID, clientSecret
-	cfg.AccessToken = ""
-	cfg.RefreshToken = tokens.RefreshToken
-	if cfg.RefreshToken == "" {
-		cfg.AccessToken = tokens.AccessToken
+	accessToken := ""
+	if tokens.RefreshToken == "" {
+		accessToken = tokens.AccessToken
 	}
-	return config.Save(path, cfg)
+	return config.UpdateCredentials(path, accessToken, tokens.RefreshToken, clientID, clientSecret)
 }
 
 func exchangeOAuthCode(ctx context.Context, code, verifier, redirectURI, clientID, clientSecret string) (Tokens, error) {
@@ -230,16 +224,15 @@ func exchangeOAuthCode(ctx context.Context, code, verifier, redirectURI, clientI
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
-		return Tokens{}, fmt.Errorf("exchange OAuth code: %w", err)
+		return Tokens{}, errors.New("exchange OAuth code: token endpoint request failed")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		return Tokens{}, fmt.Errorf("exchange OAuth code: Google returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return Tokens{}, fmt.Errorf("exchange OAuth code: Google returned HTTP %d (%s)", resp.StatusCode, http.StatusText(resp.StatusCode))
 	}
 	var tokens Tokens
 	if err := json.NewDecoder(resp.Body).Decode(&tokens); err != nil {
-		return Tokens{}, fmt.Errorf("decode OAuth token response: %w", err)
+		return Tokens{}, errors.New("decode OAuth token response: invalid JSON response")
 	}
 	return tokens, nil
 }
@@ -264,16 +257,15 @@ func Refresh(ctx context.Context, cfg config.Config) (Tokens, error) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
-		return Tokens{}, fmt.Errorf("refresh Google OAuth token: %w", err)
+		return Tokens{}, errors.New("refresh Google OAuth token: token endpoint request failed")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		return Tokens{}, fmt.Errorf("refresh Google OAuth token: Google returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return Tokens{}, fmt.Errorf("refresh Google OAuth token: Google returned HTTP %d (%s)", resp.StatusCode, http.StatusText(resp.StatusCode))
 	}
 	var tokens Tokens
 	if err := json.NewDecoder(resp.Body).Decode(&tokens); err != nil {
-		return Tokens{}, fmt.Errorf("decode Google OAuth refresh response: %w", err)
+		return Tokens{}, errors.New("decode Google OAuth refresh response: invalid JSON response")
 	}
 	return tokens, nil
 }

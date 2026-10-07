@@ -92,7 +92,7 @@ func loopbackFetcher(endpoint, token string) *Fetcher {
 	return NewFetcher(Transport{
 		AccessToken: func(context.Context) (string, error) { return token, nil },
 		ProjectID:   func() string { return "" },
-		Post: func(ctx context.Context, token, path, accept, userAgent string, payload any) (*http.Response, error) {
+		Post: func(ctx context.Context, token, path, accept string, payload any) (*http.Response, error) {
 			body, err := json.Marshal(payload)
 			if err != nil {
 				return nil, err
@@ -103,7 +103,6 @@ func loopbackFetcher(endpoint, token string) *Fetcher {
 			}
 			request.Header.Set("Authorization", "Bearer "+token)
 			request.Header.Set("Accept", accept)
-			request.Header.Set("User-Agent", userAgent)
 			response, err := http.DefaultClient.Do(request)
 			if err != nil {
 				return nil, err
@@ -134,7 +133,7 @@ func TestFetcherSanitizesTransportFailures(t *testing.T) {
 			fetcher := NewFetcher(Transport{
 				AccessToken: func(context.Context) (string, error) { return secret, test.authErr },
 				ProjectID:   func() string { return "" },
-				Post: func(context.Context, string, string, string, string, any) (*http.Response, error) {
+				Post: func(context.Context, string, string, string, any) (*http.Response, error) {
 					if test.authErr != nil {
 						t.Fatal("failed authentication issued a request")
 					}
@@ -165,7 +164,7 @@ func TestFetcherBoundsErrorsAndClosesBody(t *testing.T) {
 	fetcher := NewFetcher(Transport{
 		AccessToken: func(context.Context) (string, error) { return "test-token", nil },
 		ProjectID:   func() string { return "" },
-		Post: func(context.Context, string, string, string, string, any) (*http.Response, error) {
+		Post: func(context.Context, string, string, string, any) (*http.Response, error) {
 			return &http.Response{Body: body}, nil
 		},
 	})

@@ -133,9 +133,10 @@ func TestGeminiCredentialsStaySeparateFromGoogleOAuth(t *testing.T) {
 	}
 }
 
-func TestGeminiUpstreamErrorRetainsProviderDetails(t *testing.T) {
-	const providerError = `{"error":{"code":429,"message":"quota exhausted","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"30s"}]}}`
+func TestGeminiUpstreamErrorSanitizesProviderDetails(t *testing.T) {
+	const providerError = `{"error":{"code":429,"message":"secret-token","status":"RESOURCE_EXHAUSTED","details":[{"credential":"secret-token"}]}}`
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "30")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, _ = io.WriteString(w, providerError)
 	}))
@@ -143,7 +144,8 @@ func TestGeminiUpstreamErrorRetainsProviderDetails(t *testing.T) {
 	p := New(config.Config{AccessToken: "google-token", ProjectID: "project", DailyEndpoint: upstream.URL, ProdEndpoint: upstream.URL})
 	w := httptest.NewRecorder()
 	p.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-example:generateContent", strings.NewReader(`{"contents":[{"parts":[{"text":"Hello"}]}]}`)))
-	if w.Code != http.StatusTooManyRequests || w.Body.String() != providerError {
-		t.Fatalf("provider error changed: status=%d body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusTooManyRequests || strings.Contains(w.Body.String(), "secret-token") || w.Header().Get("Retry-After") != "30" {
+		t.Fatalf("unsafe provider error: status=%d body=%s headers=%v", w.Code, w.Body.String(), w.Header())
 	}
+	assertCatalogTestError(t, w, http.StatusTooManyRequests, "RESOURCE_EXHAUSTED")
 }

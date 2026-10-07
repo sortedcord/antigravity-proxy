@@ -55,15 +55,18 @@ func TestLoginPersistsPairOnlyWithSuccessfulTokens(t *testing.T) {
 	id, secret := syntheticPair(t)
 	path := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.Config{Port: 9191, ProjectID: t.Name(), AccessToken: "obsolete", RefreshToken: "obsolete"}
-	if err := saveLoginTokens(cfg, path, Tokens{}, id, secret); err == nil {
+	if err := saveLoginTokens(path, Tokens{}, id, secret); err == nil {
 		t.Fatal("login accepted missing access token")
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("failed login wrote configuration")
 	}
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
 	for _, refresh := range []string{t.Name() + "-refresh", ""} {
 		tokens := Tokens{AccessToken: t.Name() + "-access", RefreshToken: refresh}
-		if err := saveLoginTokens(cfg, path, tokens, id, secret); err != nil {
+		if err := saveLoginTokens(path, tokens, id, secret); err != nil {
 			t.Fatal(err)
 		}
 		data, err := os.ReadFile(path)
@@ -151,7 +154,7 @@ func TestExchangeOAuthCodeSendsMatchingPairAndPKCE(t *testing.T) {
 		if err := r.ParseForm(); err != nil {
 			t.Error("cannot decode authorization form")
 		}
-		if r.Form.Get("client_id") != id || r.Form.Get("client_secret") != secret || r.Form.Get("code_verifier") != t.Name()+"-verifier" || r.Form.Get("grant_type") != "authorization_code" || r.Form.Get("redirect_uri") != "http://localhost:51121/oauth-callback" {
+		if r.Form.Get("client_id") != id || r.Form.Get("client_secret") != secret || r.Form.Get("code_verifier") != t.Name()+"-verifier" || r.Form.Get("grant_type") != "authorization_code" || r.Form.Get("redirect_uri") != "http://127.0.0.1:51121/oauth-callback" {
 			t.Error("authorization exchange changed the client pair or PKCE parameters")
 		}
 		_, _ = io.WriteString(w, `{"access_token":"synthetic-access","refresh_token":"synthetic-refresh"}`)
@@ -164,7 +167,7 @@ func TestExchangeOAuthCodeSendsMatchingPairAndPKCE(t *testing.T) {
 	original := http.DefaultTransport
 	http.DefaultTransport = oauthTestTransport{base: original, target: target}
 	t.Cleanup(func() { http.DefaultTransport = original })
-	tokens, err := exchangeOAuthCode(context.Background(), t.Name()+"-code", t.Name()+"-verifier", "http://localhost:51121/oauth-callback", id, secret)
+	tokens, err := exchangeOAuthCode(context.Background(), t.Name()+"-code", t.Name()+"-verifier", "http://127.0.0.1:51121/oauth-callback", id, secret)
 	if err != nil || tokens.RefreshToken == "" {
 		t.Fatal("authorization code exchange did not return refresh token")
 	}
@@ -182,12 +185,21 @@ func (output loginTestOutput) Write(data []byte) (int, error) {
 }
 
 func TestLoginCallbackPersistsPairForLaterRefresh(t *testing.T) {
-	for _, failAuthorization := range []bool{false, true} {
-		t.Run(map[bool]string{false: "successful", true: "rejected"}[failAuthorization], func(t *testing.T) {
+	for _, scenario := range []struct {
+		name              string
+		failAuthorization bool
+		failToken         bool
+	}{
+		{name: "successful"},
+		{name: "rejected", failAuthorization: true},
+		{name: "token endpoint rejected", failToken: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			failAuthorization := scenario.failAuthorization
 			clearOAuthEnvironment(t)
 			id, secret := syntheticPair(t)
 			cfg := config.Config{OAuthClientID: id, OAuthClientSecret: secret, ProjectID: t.Name()}
-			if !failAuthorization {
+			if !failAuthorization && !scenario.failToken {
 				home := isolatedDiscoveryHome(t)
 				data, nativeID, nativeSecret := syntheticNativeCLI(t)
 				id, secret = nativeID, nativeSecret
@@ -195,6 +207,19 @@ func TestLoginCallbackPersistsPairForLaterRefresh(t *testing.T) {
 				cfg.OAuthClientID, cfg.OAuthClientSecret = "", ""
 			}
 			path := filepath.Join(t.TempDir(), "config.json")
+			if !failAuthorization {
+				if err := config.Save(path, config.Config{ProjectID: cfg.ProjectID}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var before []byte
+			if scenario.failToken {
+				var err error
+				before, err = os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 			listener, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
 				t.Fatal(err)
@@ -218,6 +243,11 @@ func TestLoginCallbackPersistsPairForLaterRefresh(t *testing.T) {
 					}
 				} else if grant != "refresh_token" || r.Form.Get("refresh_token") != t.Name()+"-refresh" {
 					t.Error("later refresh did not use the saved token")
+				}
+				if scenario.failToken {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = io.WriteString(w, `{"error_description":"token-secret-must-not-escape"}`)
+					return
 				}
 				_ = json.NewEncoder(w).Encode(Tokens{AccessToken: t.Name() + "-access", RefreshToken: t.Name() + "-refresh", ExpiresIn: 3600})
 			}))
@@ -252,28 +282,79 @@ func TestLoginCallbackPersistsPairForLaterRefresh(t *testing.T) {
 			if err != nil {
 				t.Fatal("invalid callback URL")
 			}
+			if callbackURL.Hostname() != "127.0.0.1" {
+				t.Fatal("callback redirect does not match the IPv4 loopback listener")
+			}
+			callbackClient := &http.Client{Transport: original, Timeout: 5 * time.Second}
+			for _, stray := range []struct {
+				method string
+				query  url.Values
+				status int
+			}{
+				{http.MethodGet, url.Values{"state": {"wrong-state"}, "code": {"stray-code"}}, http.StatusBadRequest},
+				{http.MethodGet, url.Values{"state": {query.Get("state")}}, http.StatusBadRequest},
+				{http.MethodPost, url.Values{"state": {query.Get("state")}, "code": {"stray-code"}}, http.StatusMethodNotAllowed},
+			} {
+				callbackURL.RawQuery = stray.query.Encode()
+				request, err := http.NewRequest(stray.method, callbackURL.String(), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				response, err := callbackClient.Do(request)
+				if err != nil {
+					t.Fatal("could not deliver stray callback")
+				}
+				response.Body.Close()
+				if response.StatusCode != stray.status {
+					t.Fatalf("stray callback status = %d, want %d", response.StatusCode, stray.status)
+				}
+				select {
+				case err := <-result:
+					t.Fatalf("stray callback finished login: %v", err)
+				default:
+				}
+			}
 			callbackQuery := url.Values{"state": {query.Get("state")}, "code": {t.Name() + "-code"}}
 			if failAuthorization {
-				callbackQuery.Set("error", "access_denied")
+				callbackQuery.Set("error", "access_denied-secret-must-not-escape")
 			}
 			callbackURL.RawQuery = callbackQuery.Encode()
-			callbackClient := &http.Client{Transport: original, Timeout: 5 * time.Second}
 			response, err := callbackClient.Get(callbackURL.String())
 			if err != nil {
 				t.Fatal("could not deliver loopback callback")
 			}
 			response.Body.Close()
+			wantStatus := http.StatusOK
+			if failAuthorization {
+				wantStatus = http.StatusBadRequest
+			}
+			if response.StatusCode != wantStatus {
+				t.Fatalf("callback status = %d, want %d", response.StatusCode, wantStatus)
+			}
 			select {
 			case err = <-result:
 			case <-time.After(5 * time.Second):
 				t.Fatal("login did not finish callback exchange")
 			}
 			if failAuthorization {
+				if err != nil && strings.Contains(err.Error(), "secret-must-not-escape") {
+					t.Fatal("authorization error reflected untrusted callback data")
+				}
 				if err == nil || calls.Load() != 0 {
 					t.Fatal("rejected authorization exchanged tokens")
 				}
 				if _, err := os.Stat(path); !os.IsNotExist(err) {
 					t.Fatal("rejected authorization persisted credentials")
+				}
+				return
+			}
+			if scenario.failToken {
+				if err == nil || strings.Contains(err.Error(), "secret-must-not-escape") || calls.Load() != 1 {
+					t.Fatal("token endpoint failure leaked credentials or was not returned")
+				}
+				after, readErr := os.ReadFile(path)
+				if readErr != nil || string(after) != string(before) {
+					t.Fatal("failed token exchange changed saved configuration", readErr)
 				}
 				return
 			}

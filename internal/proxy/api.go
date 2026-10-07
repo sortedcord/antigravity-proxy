@@ -14,6 +14,10 @@ import (
 // Health is unauthenticated and does not probe Google; other supported routes
 // require the local API key when one is configured.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	p.serveWithAccessLog(w, r)
+}
+
+func (p *Proxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/health" && r.Method == http.MethodGet:
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "credential_configured": p.cfg.AccessToken != "" || p.cfg.RefreshToken != ""})
@@ -70,22 +74,17 @@ func (p *Proxy) authorized(w http.ResponseWriter, r *http.Request) bool {
 func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 	token, err := p.accessToken(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Google authentication unavailable"})
 		return
 	}
 	projectID, err := p.getProjectID(r.Context(), token)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeGeminiUpstreamError(w, err)
 		return
 	}
-	resp, err := p.postToAntigravity(r.Context(), token, "/v1internal:fetchAvailableModels", "application/json", "", map[string]any{"project": projectID})
+	resp, err := p.postToAntigravity(r.Context(), token, "/v1internal:fetchAvailableModels", "application/json", map[string]any{"project": projectID})
 	if err != nil {
-		status := http.StatusBadGateway
-		var upstream *upstreamError
-		if errors.As(err, &upstream) && upstream.Status >= 400 && upstream.Status <= 599 {
-			status = upstream.Status
-		}
-		writeJSON(w, status, map[string]string{"error": err.Error()})
+		writeGeminiUpstreamError(w, err)
 		return
 	}
 	defer resp.Body.Close()
@@ -172,8 +171,8 @@ func writeGeminiError(w http.ResponseWriter, code int, message string) {
 	writeJSON(w, code, map[string]any{"error": map[string]any{"code": code, "message": message, "status": status}})
 }
 
-// writeGeminiUpstreamError preserves Google's structured error and HTTP status
-// when available, rather than discarding provider-specific error details.
+// writeGeminiUpstreamError exposes HTTP status and validated retry metadata,
+// never provider bodies, credentials or arbitrary transport error strings.
 func writeGeminiUpstreamError(w http.ResponseWriter, err error) {
 	status := http.StatusBadGateway
 	var upstream *upstreamError
@@ -181,15 +180,9 @@ func writeGeminiUpstreamError(w http.ResponseWriter, err error) {
 		if upstream.Status >= 400 && upstream.Status <= 599 {
 			status = upstream.Status
 		}
-		var body struct {
-			Error json.RawMessage `json:"error"`
-		}
-		if json.Unmarshal([]byte(upstream.Body), &body) == nil && len(body.Error) > 0 && body.Error[0] == '{' {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(status)
-			_, _ = io.WriteString(w, upstream.Body)
-			return
+		for key, values := range safeUpstreamHeaders(upstream.Headers) {
+			w.Header()[key] = values
 		}
 	}
-	writeGeminiError(w, status, err.Error())
+	writeGeminiError(w, status, "Google upstream request failed")
 }

@@ -30,6 +30,8 @@ The native binary is scanned for client IDs and secrets; when multiple identitie
 
 Successful login saves the exact client pair as `oauthClientId` / `oauthClientSecret` alongside the resulting token in the owner-only config file. Serving and token refresh use this saved pair and never discover/download a CLI, so a mounted login config also works in the scratch Docker image. Explicit environment credentials must be supplied as a complete pair and override the saved pair without mixing fields. Legacy configs with a refresh token but no client pair need another `login` or the original issuing-client pair; a new OAuth client cannot refresh a token issued to another client.
 
+Login updates only saved OAuth token/client fields. It preserves unrelated settings already on disk and never persists runtime environment overrides or resolved defaults (including container-specific history paths). Config writes use private unique temporary files and sync before replacement. On Unix, existing config files must be owner-only (`chmod 600 ~/.config/antigravity-proxy/config.json`); unknown JSON keys, duplicate top-level keys (including spelling/case aliases), and trailing documents are rejected. Single case-insensitive field aliases remain accepted.
+
 The service listens on `127.0.0.1:8080` by default:
 
 ```sh
@@ -221,9 +223,9 @@ See Bifrost's primary [Provider Configuration](https://docs.getbifrost.ai/quicks
 
 - Native generation preserves request and response fields, including `systemInstruction`, tools/function calls and responses, thought signatures, and inline image/video data. Text generation, video understanding, and native Gemini image generation/editing use the same generation routes, only when the selected upstream model supports the request. Forwarding tool fields does **not** establish support for Google Search, code execution, TTS, or other built-in Google APIs.
 - The proxy adds/removes only the Cloud Code transport envelope, with one backend-specific schema adaptation: `generationConfig.responseJsonSchema` is renamed to `generationConfig.responseSchema` so Bifrost structured-output requests reach the backend. Schema types and constraints are unchanged. Supplying both schema fields returns a native `400` error.
-- There is no prompt injection, output cleaning, schema filtering, or automatic token/thinking-budget default or cap. Catalog token metadata is descriptive, not a proxy request clamp. The existing transport limits are a **50 MiB request body** and a **five-minute upstream timeout**; upstream model limits still apply.
-- Successful SSE events are unwrapped and flushed incrementally, with one complete JSON value per `data:` line. Upstream HTTP errors preserve the Google error object and status. Malformed upstream data before streaming starts returns `502`; a broken stream or EOF before started candidates finish aborts the connection rather than fabricating a successful completion. Native error and blocked-prompt outcomes remain valid terminal responses. Clients must treat an interrupted stream as incomplete.
-- Daily-to-production fallback happens only before a successful response. Once successful SSE streaming begins, the request is not replayed against another endpoint.
+- There is no prompt injection, output cleaning, schema filtering, or automatic token/thinking-budget default or cap. Catalog token metadata is descriptive, not a proxy request clamp. The transport limits are a **50 MiB request body**, a **five-minute response-header deadline**, a **resetting five-minute body-inactivity deadline**, and **two concurrent generations** by default; active responses have no fixed lifetime cap. Upstream model limits still apply.
+- Successful SSE events are unwrapped and flushed incrementally, with one complete JSON value per `data:` line. Upstream HTTP errors preserve their status and validated retry headers but use a sanitized Gemini error envelope instead of exposing arbitrary provider bodies. Malformed upstream data before streaming starts returns `502`; a broken stream or EOF before started candidates finish aborts the connection rather than fabricating successful completion. Native error and blocked-prompt outcomes remain valid terminal responses. Clients must treat an interrupted stream as incomplete.
+- Daily-to-production fallback is limited to transport failures, `404`, and `5xx`, before a successful upstream response. Once a successful upstream response begins, the request is not replayed against another endpoint.
 
 Not implemented: Anthropic Messages or OpenAI endpoints, `countTokens`, embeddings, Imagen `predict`, Veo, file uploads, caches, batches, or audio-special endpoints. Unsupported model actions return a native `501 UNIMPLEMENTED` error; unrelated paths return `404`. A model appearing in the catalog does not add those operations.
 
@@ -298,7 +300,7 @@ Illustrative `/status/limit` response only; these dates and values are not accou
 
 All four windows are represented. `status` is `available`, `disabled`, or `unavailable`; disabled or missing/invalid upstream data has unusable values represented as `null` and an `unavailable_reason` (for example, `upstream_disabled` or `not_reported`). A valid remaining fraction of zero means exhausted quota, not missing data. Percentages derive only from a valid upstream fraction; `remaining_amount`, if supplied, is a decimal string without invented units. Reset times come only from upstream and may be `null`. The proxy does not infer weekly limits from model metadata or fabricate refresh times.
 
-`stale` is true when the observation is older than the configured interval or the latest polling attempt failed. `polling` reports the interval, nullable attempt/success timestamps, and `last_error` when present. Before any successful persisted observation, `/status/limit` returns `503` with an error and polling metadata. A failed fetch or save retains the last good snapshot, marked stale; a restart reloads persisted history before the next fetch completes.
+`stale` is true when the observation is older than twice the configured interval or the latest polling attempt failed. The grace interval avoids marking data stale while a scheduled fetch completes. `polling` reports the interval, nullable attempt/success timestamps, and `last_error` when present. Before any successful persisted observation, `/status/limit` returns `503` with an error and polling metadata. A failed fetch or save retains the last good snapshot, marked stale; a restart reloads persisted history before the next fetch completes.
 
 ### History queries
 
@@ -312,7 +314,7 @@ All four windows are represented. `status` is `available`, `disabled`, or `unava
 | `offset` | Integer `0` or greater | `0` |
 | `order` | `asc`, `desc` by observation time | `desc` |
 
-Unknown or duplicate parameters, empty values, and invalid values return `400`. When using query-key authentication, `key` is also accepted as the local API key. Fix a `to` timestamp for all pages of a query so new polls cannot shift the result set while you paginate.
+Unknown or duplicate parameters, empty values, and invalid values return `400`. When using query-key authentication, `key` is also accepted as the local API key. Fix a `to` timestamp across pages to exclude new polls; retention can still evict older entries and shift offsets, so pagination is not a frozen snapshot.
 
 `/status/usage` returns `entries`, `total` (matching window entries before pagination), `limit`, `offset`, nullable `next_offset`, `order`, selected `pool`/`window`, optional `from`/`to`, and `polling`. Each entry is one selected window from one observation: `observed_at`, `pool`, `pool_display_name`, plus the flat window fields shown above. Thus one poll contributes up to four entries, including disabled/unavailable windows with null values. An empty result has `entries: []`; follow `next_offset` until it is `null`.
 
@@ -320,9 +322,17 @@ This is **quota observation history, not billable usage**. `used_percent` descri
 
 ### Persistence and account scope
 
-Observations are appended to owner-only JSONL at `$HOME/.local/share/antigravity-proxy/usage.jsonl` by default, independently of the OAuth config. Override with `quotaHistoryPath` or nonempty `ANTIGRAVITY_QUOTA_HISTORY_PATH`. Each successful observation is synced to disk before publication. Serving fails explicitly if history is corrupt or cannot be opened for writing; there is no silent in-memory fallback. SIGINT/SIGTERM stop polling and close storage.
+Observations are stored in owner-only JSONL at `$HOME/.local/share/antigravity-proxy/usage.jsonl` by default, independently of the OAuth config. Override with `quotaHistoryPath` or nonempty `ANTIGRAVITY_QUOTA_HISTORY_PATH`. Each successful observation is synced before publication. An incomplete final record after a crash is truncated with a warning; malformed complete records and inaccessible storage still fail startup. SIGINT/SIGTERM stop polling and close storage.
 
-History is retained indefinitely without automatic pruning and loaded into memory on startup; plan disk and memory capacity accordingly. Use **one server writer per history path**. The service supports one Google account, and the file is not an account-partitioned database: choose a separate history path/volume when changing Google credentials so observations from different accounts are not mixed. Protect and back up history as account-related data; it does not contain OAuth tokens.
+History retains the latest **10,000 observations** by default (about 35 days at five-minute polling). Set positive `quotaHistoryMaxSamples` or `ANTIGRAVITY_QUOTA_HISTORY_MAX_SAMPLES` to change this bound. Startup compacts older observations; ongoing collection bounds disk and memory too. An exclusive companion lock enforces **one writer per history path**, including during file replacement. The file is not account-partitioned: choose a separate history path/volume when changing Google credentials. Protect and back up history as account-related data; it does not contain OAuth tokens.
+
+Strict count retention rewrites the retained observations when the file is full: encoding and disk writes are proportional to `quotaHistoryMaxSamples` on each subsequent successful poll. This favors an exact disk bound and atomic recovery over append-only write efficiency. Larger retention counts or shorter poll intervals increase write volume; choose them according to storage capacity and durability requirements.
+
+A local Linux/amd64 measurement using unavailable-window snapshots, ten durable rewrites per case, measured approximately 14 ms / 1.15 MB per rewrite at 1,000 observations and 161 ms / 11.49 MB at 10,000. These are filesystem/workload-specific observations, not performance guarantees; five-minute polling at the latter size rewrites about 3.3 GB/day once full.
+
+Parent-directory symlink aliases resolve to one history/lock identity. The history file and its companion lock cannot themselves be symlinks; use a direct regular-file path. Startup removes abandoned compaction files belonging to that history under its lock. Legacy anonymous `.quota-history-*` files cannot be safely attributed and require manual inspection rather than automatic deletion.
+
+History locking/durability implementations cover Linux/Android, macOS/iOS, DragonFly/FreeBSD/NetBSD/OpenBSD, illumos, Solaris, AIX and Windows. Unix storage uses real file locks plus rename/directory sync; Windows uses `LockFileEx` and write-through `MoveFileEx`. Writable non-append history handles support torn-tail truncation on Windows; appends seek to EOF under the exclusive lock. Other targets fail closed instead of silently omitting storage locking.
 
 For authoritative product policy and model availability, see Google's [Antigravity Plans](https://antigravity.google/docs/plans), [Models](https://antigravity.google/docs/models), and [CLI model quotas (`/usage`)](https://antigravity.google/docs/cli/commands/usage/). Those pages describe the product, not a supported public quota API contract. This proxy uses an internal endpoint, and quotas/availability can change upstream.
 
@@ -346,9 +356,12 @@ The command explicitly composes the services: `proxy.New(cfg)` owns the shared G
 Run all package tests and static checks from the repository root:
 
 ```sh
-go test ./...
+go test -race -count=1 ./...
 go vet ./...
+gofmt -l cmd internal
 ```
+
+CI runs formatting, vet and race checks before building or publishing Docker images.
 
 The root no longer contains a Go executable package; use `./cmd/antigravity-proxy` for build/run commands.
 
@@ -366,6 +379,9 @@ The optional JSON file is `~/.config/antigravity-proxy/config.json`:
   "oauthClientSecret": "",
   "projectId": "",
   "quotaPollIntervalSeconds": 300,
+  "quotaHistoryMaxSamples": 10000,
+  "maxConcurrentGenerations": 2,
+  "clientVersion": "1.15.8",
   "quotaHistoryPath": "/home/your-user/.local/share/antigravity-proxy/usage.jsonl"
 }
 ```
@@ -387,12 +403,18 @@ Environment variables override file values:
 | `ANTIGRAVITY_DAILY_ENDPOINT` | Daily Cloud Code endpoint override | `https://daily-cloudcode-pa.googleapis.com` |
 | `ANTIGRAVITY_PROD_ENDPOINT` | Production Cloud Code endpoint override | `https://cloudcode-pa.googleapis.com` |
 | `ANTIGRAVITY_CLIENT_VERSION` | Client version sent in Antigravity headers | `1.15.8` |
-| `OAUTH_CALLBACK_PORT` | Preferred localhost OAuth callback port; fallback ports are tried if busy | `51121` |
+| `OAUTH_CALLBACK_PORT` | Preferred IPv4 loopback OAuth callback port; fallback ports are tried if busy | `51121` |
 | `ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS` | Positive integer polling interval in seconds; zero is invalid | `300` |
 | `ANTIGRAVITY_QUOTA_HISTORY_PATH` | Nonempty writable JSONL history path, separate from the OAuth config | `$HOME/.local/share/antigravity-proxy/usage.jsonl`; image explicitly sets `/home/app/.local/share/antigravity-proxy/usage.jsonl` |
+| `ANTIGRAVITY_QUOTA_HISTORY_MAX_SAMPLES` | Positive maximum retained quota observations | `10000` |
+| `ANTIGRAVITY_MAX_CONCURRENT_GENERATIONS` | Positive concurrent generation limit; saturation returns `429` before reading the body | `2` |
 
 Cloud Code endpoint overrides must use HTTPS. Plain HTTP is accepted only for `localhost` or loopback addresses, so local stub servers can be used without sending tokens over a network connection.
 
 When a refresh token is configured, the service refreshes and caches its Google access token as needed using the saved or explicitly supplied client pair. A directly supplied access token bypasses client discovery/resolution and is not refreshed automatically. Configuration files created by `login`, including the client pair and account tokens, are written with mode `0600`; do not commit or bake them into images.
 
-Cloud Code requests fall back from the daily endpoint to production when the first endpoint fails before a successful response; streaming requests are never replayed after successful SSE begins. The service supports one Google account, observes its upstream quota on a fixed polling schedule, and does not include an automatic generation retry/cooldown policy.
+Cloud Code calls use daily then production consistently. Fallback is limited to transport failures, HTTP `404`, and `5xx`; `400`, auth failures, and `429` are terminal. Safe retry headers, including valid `Retry-After`, survive error responses; arbitrary upstream/OAuth error bodies are not exposed. Streaming requests are never replayed after a successful upstream response. Project discovery errors are explicit rather than silently selecting a shared fallback project. Discovered project IDs are invalidated only after terminal, narrowly classified project-specific `403`/`404` errors; a successful production fallback or generic permission denial preserves project/catalog caches. The service supports one Google account and does not automatically retry generation after quota exhaustion.
+
+Generation has no fixed total duration limit: connection setup, request upload and waiting for upstream response headers share a five-minute deadline; body inactivity has a resetting five-minute deadline, while active streams can continue. Finite quota, discovery, onboarding and model-catalog operations retain a five-minute total deadline including body reads and endpoint fallback. Error classification uses bounded reads and never exposes provider messages or details. Caller cancellation closes upstream work. Generation envelopes stream small metadata around the validated raw request rather than copying the complete body through JSON marshaling. The 50 MiB request limit remains; concurrent generation capacity bounds aggregate request-memory pressure. Saturation returns `429` with `Retry-After: 1` and closes HTTP/1 connections without draining incomplete request bodies. Model discovery uses a five-minute catalog cache shared by listing and lookup, with project invalidation and independent waiter cancellation.
+
+The executable emits structured JSON logs through `log/slog`. Access events include route, model, status, duration, request ID and upstream endpoint, without query strings, credentials or request/response bodies. `X-Request-ID` correlates client responses with logs and generation envelopes. Generation, discovery and quota use one configured client version; the proxy does not send a fabricated `x-goog-api-client` identity. This does not eliminate the account risk of using an unofficial internal API.

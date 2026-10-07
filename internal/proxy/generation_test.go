@@ -314,9 +314,10 @@ func TestGenerationUpstreamHTTPErrorDoesNotCommitSSE(t *testing.T) {
 	defer upstream.Close()
 	recorder := httptest.NewRecorder()
 	generationTestProxy(upstream.URL).handleGenerateContent(recorder, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`)), "model", true)
-	if recorder.Code != http.StatusTooManyRequests || recorder.Header().Get("Content-Type") != "application/json" || !reflect.DeepEqual(decodeGenerationJSON(t, recorder.Body.Bytes()), decodeGenerationJSON(t, []byte(body))) {
+	if recorder.Code != http.StatusTooManyRequests || recorder.Header().Get("Content-Type") != "application/json" || strings.Contains(recorder.Body.String(), "native quota detail") {
 		t.Fatalf("upstream error = %d %v %s", recorder.Code, recorder.Header(), recorder.Body.String())
 	}
+	assertCatalogTestError(t, recorder, http.StatusTooManyRequests, "RESOURCE_EXHAUSTED")
 }
 
 func TestGenerateContentRejectsInvalidUpstreamJSONBeforeCommit(t *testing.T) {

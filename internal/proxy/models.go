@@ -40,8 +40,8 @@ type geminiModelList struct {
 }
 
 // geminiModelCursor stores the last sorted name and effective page size, not an
-// offset. Each page refreshes the catalog, which may add or remove entries;
-// keyset pagination gives forward-only progress, not a stable snapshot.
+// offset. Cache expiry may add or remove entries between pages; keyset
+// pagination gives forward-only progress, not a stable snapshot.
 type geminiModelCursor struct {
 	Version  int    `json:"version"`
 	After    string `json:"after"`
@@ -49,7 +49,7 @@ type geminiModelCursor struct {
 }
 
 func (p *Proxy) fetchGeminiModels(ctx context.Context, token, projectID string) ([]geminiModel, error) {
-	resp, err := p.postToAntigravity(ctx, token, "/v1internal:fetchAvailableModels", "application/json", "", map[string]string{"project": projectID})
+	resp, err := p.postToAntigravity(ctx, token, "/v1internal:fetchAvailableModels", "application/json", map[string]string{"project": projectID})
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +146,7 @@ func parseGeminiModelPagination(r *http.Request) (int, string, error) {
 func (p *Proxy) geminiModelCatalog(w http.ResponseWriter, r *http.Request) ([]geminiModel, bool) {
 	token, err := p.accessToken(r.Context())
 	if err != nil {
-		writeGeminiError(w, http.StatusServiceUnavailable, err.Error())
+		writeGeminiError(w, http.StatusServiceUnavailable, "Google authentication unavailable")
 		return nil, false
 	}
 	projectID, err := p.getProjectID(r.Context(), token)
@@ -154,7 +154,7 @@ func (p *Proxy) geminiModelCatalog(w http.ResponseWriter, r *http.Request) ([]ge
 		writeGeminiUpstreamError(w, err)
 		return nil, false
 	}
-	models, err := p.fetchGeminiModels(r.Context(), token, projectID)
+	models, err := p.cachedGeminiModels(r.Context(), token, projectID)
 	if err != nil {
 		writeGeminiUpstreamError(w, err)
 		return nil, false

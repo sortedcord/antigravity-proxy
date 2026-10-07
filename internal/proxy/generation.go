@@ -3,55 +3,87 @@ package proxy
 import (
 	"bufio"
 	"bytes"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 const maxGenerationRequestSize = 50 << 20
 
 type generationEnvelope struct {
-	Project     string                     `json:"project"`
-	Model       string                     `json:"model"`
-	Request     map[string]json.RawMessage `json:"request"`
-	UserAgent   string                     `json:"userAgent"`
-	RequestType string                     `json:"requestType"`
-	RequestID   string                     `json:"requestId"`
+	Project     string          `json:"project"`
+	Model       string          `json:"model"`
+	Request     json.RawMessage `json:"request"`
+	UserAgent   string          `json:"userAgent"`
+	RequestType string          `json:"requestType"`
+	RequestID   string          `json:"requestId"`
+}
+
+// requestBody encodes only envelope metadata. Each replay reads the same raw
+// request directly, preserving numeric literals and opaque signatures without
+// allocating another request-sized JSON buffer.
+func (payload generationEnvelope) requestBody() (func() io.Reader, int64, error) {
+	metadata, err := json.Marshal(struct {
+		Project     string `json:"project"`
+		Model       string `json:"model"`
+		UserAgent   string `json:"userAgent"`
+		RequestType string `json:"requestType"`
+		RequestID   string `json:"requestId"`
+	}{payload.Project, payload.Model, payload.UserAgent, payload.RequestType, payload.RequestID})
+	if err != nil {
+		return nil, 0, err
+	}
+	prefix := append(metadata[:len(metadata)-1], `,"request":`...)
+	return func() io.Reader {
+		return io.MultiReader(bytes.NewReader(prefix), bytes.NewReader(payload.Request), strings.NewReader("}"))
+	}, int64(len(prefix)) + int64(len(payload.Request)) + 1, nil
 }
 
 func (p *Proxy) handleGenerateContent(w http.ResponseWriter, r *http.Request, model string, stream bool) {
+	if r.Context().Err() != nil {
+		writeGeminiError(w, http.StatusServiceUnavailable, "generation canceled")
+		return
+	}
+	select {
+	case p.generationSlots <- struct{}{}:
+		defer func() { <-p.generationSlots }()
+	default:
+		if r.ProtoMajor == 1 {
+			// HTTP/1 normally drains small unread request bodies before responding.
+			// Close this connection instead, and prevent its final Body.Close from
+			// waiting for bytes a saturated caller may never send.
+			w.Header().Set("Connection", "close")
+			_ = http.NewResponseController(w).SetReadDeadline(time.Now())
+		}
+		w.Header().Set("Retry-After", "1")
+		writeGeminiError(w, http.StatusTooManyRequests, "generation capacity exhausted")
+		return
+	}
+	var err error
+	r, err = ensureRequestID(w, r)
+	if err != nil {
+		writeGeminiError(w, http.StatusInternalServerError, "create generation request ID")
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxGenerationRequestSize)
 	defer r.Body.Close()
-	var request map[string]json.RawMessage
-	decoder := json.NewDecoder(r.Body)
-	if err := decoder.Decode(&request); err != nil {
+	request, err := io.ReadAll(r.Body)
+	if err != nil {
 		writeGenerationRequestError(w, err)
 		return
 	}
-	if request == nil {
-		writeGeminiError(w, http.StatusBadRequest, "request body must be a JSON object")
-		return
-	}
-	var trailing json.RawMessage
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		if err == nil {
-			err = errors.New("request body must contain exactly one JSON object")
-		}
-		writeGenerationRequestError(w, err)
-		return
-	}
-	if err := adaptGenerationSchema(request); err != nil {
+	request, err = adaptGenerationBody(request)
+	if err != nil {
 		writeGeminiError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	token, err := p.accessToken(r.Context())
 	if err != nil {
-		writeGeminiError(w, http.StatusServiceUnavailable, err.Error())
+		writeGeminiError(w, http.StatusServiceUnavailable, "Google authentication unavailable")
 		return
 	}
 	project, err := p.getProjectID(r.Context(), token)
@@ -59,22 +91,17 @@ func (p *Proxy) handleGenerateContent(w http.ResponseWriter, r *http.Request, mo
 		writeGeminiUpstreamError(w, err)
 		return
 	}
-	var requestID [16]byte
-	if _, err := rand.Read(requestID[:]); err != nil {
-		writeGeminiError(w, http.StatusInternalServerError, "create generation request ID")
-		return
-	}
 	payload := generationEnvelope{
 		Project: project, Model: model, Request: request,
 		UserAgent: "antigravity", RequestType: "agent",
-		RequestID: "agent-" + hex.EncodeToString(requestID[:]),
+		RequestID: w.Header().Get("X-Request-ID"),
 	}
 	path, accept := "/v1internal:generateContent", "application/json"
 	if stream {
 		path, accept = "/v1internal:streamGenerateContent?alt=sse", "text/event-stream"
 	}
 	// Carry caller cancellation into the upstream transport, including body reads.
-	resp, err := p.postToAntigravity(r.Context(), token, path, accept, "", payload)
+	resp, err := p.postToAntigravity(r.Context(), token, path, accept, payload)
 	if err != nil {
 		writeGeminiUpstreamError(w, err)
 		return
@@ -86,7 +113,7 @@ func (p *Proxy) handleGenerateContent(w http.ResponseWriter, r *http.Request, mo
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		writeGeminiError(w, http.StatusBadGateway, "read generation response: "+err.Error())
+		writeGeminiError(w, http.StatusBadGateway, "read generation response from Google upstream")
 		return
 	}
 	body, err = unwrapGenerationResponse(body)
@@ -99,29 +126,94 @@ func (p *Proxy) handleGenerateContent(w http.ResponseWriter, r *http.Request, mo
 	_, _ = w.Write(body)
 }
 
-// Cloud Code accepts the native schema value under the legacy responseSchema
-// key. Only rename the modern key: schema constraints and all other caller
-// fields stay raw, and malformed generationConfig values remain upstream policy.
-func adaptGenerationSchema(request map[string]json.RawMessage) error {
+// adaptGenerationBody retains a single raw request buffer. Only generationConfig
+// is decoded and rewritten, avoiding copies of large inlineData/content fields.
+func adaptGenerationBody(body []byte) ([]byte, error) {
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 || body[0] != '{' || !json.Valid(body) {
+		return nil, errors.New("request body must contain exactly one JSON object")
+	}
+	start, end := generationConfigSpan(body)
+	if start < 0 {
+		return body, nil
+	}
 	var config map[string]json.RawMessage
-	if err := json.Unmarshal(request["generationConfig"], &config); err != nil || config == nil {
-		return nil
+	if err := json.Unmarshal(body[start:end], &config); err != nil || config == nil {
+		return body, nil
 	}
 	schema, modern := config["responseJsonSchema"]
 	if !modern {
-		return nil
+		return body, nil
 	}
 	if _, legacy := config["responseSchema"]; legacy {
-		return errors.New("generationConfig.responseJsonSchema and responseSchema are mutually exclusive")
+		return nil, errors.New("generationConfig.responseJsonSchema and responseSchema are mutually exclusive")
 	}
 	config["responseSchema"] = schema
 	delete(config, "responseJsonSchema")
 	encoded, err := json.Marshal(config)
 	if err != nil {
-		return fmt.Errorf("encode generationConfig: %w", err)
+		return nil, fmt.Errorf("encode generationConfig: %w", err)
 	}
-	request["generationConfig"] = encoded
-	return nil
+	result := make([]byte, 0, len(body)-(end-start)+len(encoded))
+	result = append(result, body[:start]...)
+	result = append(result, encoded...)
+	return append(result, body[end:]...), nil
+}
+
+// generationConfigSpan scans already validated JSON without decoding/copying
+// large values. The last duplicate field wins, matching encoding/json.
+func generationConfigSpan(body []byte) (start, end int) {
+	start, end = -1, -1
+	space := func(i int) int {
+		for i < len(body) && (body[i] == ' ' || body[i] == '\n' || body[i] == '\r' || body[i] == '\t') {
+			i++
+		}
+		return i
+	}
+	stringEnd := func(i int) int {
+		i++
+		for i < len(body) {
+			if body[i] == '\\' {
+				i += 2
+				continue
+			}
+			if body[i] == '"' {
+				return i + 1
+			}
+			i++
+		}
+		return i
+	}
+	for i := space(1); i < len(body) && body[i] != '}'; {
+		keyEnd := stringEnd(i)
+		var key string
+		_ = json.Unmarshal(body[i:keyEnd], &key)
+		i = space(space(keyEnd) + 1)
+		valueStart, depth := i, 0
+		for i < len(body) {
+			if body[i] == '"' {
+				i = stringEnd(i)
+				continue
+			}
+			if depth == 0 && (body[i] == ',' || body[i] == '}') {
+				break
+			}
+			switch body[i] {
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+			}
+			i++
+		}
+		if key == "generationConfig" {
+			start, end = valueStart, i
+		}
+		if i < len(body) && body[i] == ',' {
+			i = space(i + 1)
+		}
+	}
+	return start, end
 }
 
 func writeGenerationRequestError(w http.ResponseWriter, err error) {
@@ -130,7 +222,7 @@ func writeGenerationRequestError(w http.ResponseWriter, err error) {
 	if errors.As(err, &tooLarge) {
 		status = http.StatusRequestEntityTooLarge
 	}
-	writeGeminiError(w, status, "invalid generation request: "+err.Error())
+	writeGeminiError(w, status, "invalid generation request")
 }
 
 // unwrapGenerationResponse removes only the Cloud Code transport envelope.
@@ -283,7 +375,7 @@ func forwardGenerationStream(w http.ResponseWriter, body io.Reader) {
 			// convert a truncated or malformed upstream stream to success.
 			panic(http.ErrAbortHandler)
 		}
-		writeGeminiError(w, http.StatusBadGateway, "invalid generation stream: "+err.Error())
+		writeGeminiError(w, http.StatusBadGateway, "invalid generation stream from Google upstream")
 	}
 	for {
 		event, readErr := readGenerationSSEEvent(reader)

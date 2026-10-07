@@ -198,7 +198,7 @@ func TestFetchAndSaveFailuresRetainLastGoodSnapshot(t *testing.T) {
 	next := observation(observationTime().Add(time.Minute), 0.1)
 	calls := 0
 	path := filepath.Join(t.TempDir(), "history")
-	c, err := Open(path, time.Second, func(context.Context) (quota.Snapshot, error) {
+	c, err := Open(path, time.Second, 0, func(context.Context) (quota.Snapshot, error) {
 		calls++
 		if calls == 2 {
 			return quota.Snapshot{}, errors.New("quota upstream unavailable")

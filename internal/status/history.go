@@ -11,7 +11,8 @@ import (
 
 // Query selects observation times inclusively and pages flattened quota windows.
 // Zero-valued fields use the documented defaults. Fix To while paging if new
-// observations must not shift the selected time range.
+// observations must not shift the selected time range. Count-based retention
+// may still evict older appends, even when their observation times are newer.
 type Query struct {
 	From   *time.Time
 	To     *time.Time

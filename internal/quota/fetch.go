@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"runtime"
 	"time"
 )
 
@@ -19,12 +18,12 @@ var ErrAuthenticationBusy = errors.New("quota authentication is busy")
 // Transport connects quota fetching to the account's existing credentials,
 // project cache, and HTTP transport. ProjectID must only inspect an immediately
 // available cached or configured project; it must not discover or provision one.
-// Post retains native headers and endpoint fallback, applying the supplied user
-// agent. Errors may implement HTTPStatus() int to report a failed upstream status.
+// Post retains the account's unified identity and endpoint fallback.
+// Errors may implement HTTPStatus() int.
 type Transport struct {
 	AccessToken func(context.Context) (string, error)
 	ProjectID   func() string
-	Post        func(ctx context.Context, token, path, accept, userAgent string, payload any) (*http.Response, error)
+	Post        func(ctx context.Context, token, path, accept string, payload any) (*http.Response, error)
 }
 
 // Fetcher obtains authoritative quota without owning OAuth or transport caches.
@@ -40,6 +39,8 @@ func NewFetcher(transport Transport) *Fetcher {
 // Fetch builds and parses one bounded quota request. Only credential-safe errors
 // escape this boundary; cancellation remains recognizable by callers.
 func (f *Fetcher) Fetch(ctx context.Context) (Snapshot, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return Snapshot{}, err
 	}
@@ -57,11 +58,16 @@ func (f *Fetcher) Fetch(ctx context.Context) (Snapshot, error) {
 	if projectID := f.transport.ProjectID(); projectID != "" {
 		payload["project"] = projectID
 	}
-	userAgent := fmt.Sprintf("antigravity/hub/2.9.1 %s/%s", runtime.GOOS, runtime.GOARCH)
-	resp, err := f.transport.Post(ctx, token, summaryPath, "application/json", userAgent, payload)
+	resp, err := f.transport.Post(ctx, token, summaryPath, "application/json", payload)
 	if err != nil {
 		if ctx.Err() != nil {
 			return Snapshot{}, ctx.Err()
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return Snapshot{}, context.DeadlineExceeded
+		}
+		if errors.Is(err, context.Canceled) {
+			return Snapshot{}, context.Canceled
 		}
 		var upstream interface{ HTTPStatus() int }
 		if errors.As(err, &upstream) {
@@ -75,6 +81,12 @@ func (f *Fetcher) Fetch(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		if ctx.Err() != nil {
 			return Snapshot{}, ctx.Err()
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return Snapshot{}, context.DeadlineExceeded
+		}
+		if errors.Is(err, context.Canceled) {
+			return Snapshot{}, context.Canceled
 		}
 		return Snapshot{}, errors.New("read quota response failed")
 	}

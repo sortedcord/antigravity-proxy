@@ -184,7 +184,7 @@ func TestQuotaStatusPollingHistoryAndRestartHTTP(t *testing.T) {
 
 func TestStatusUsageRejectsInvalidFilters(t *testing.T) {
 	service := NewService(config.Config{QuotaPollIntervalSeconds: 300, QuotaHistoryPath: filepath.Join(t.TempDir(), "usage.jsonl")}, nil)
-	collector, err := Open(service.historyPath, 5*time.Minute, func(context.Context) (quota.Snapshot, error) { panic("read-only request unexpectedly fetched quota") })
+	collector, err := Open(service.historyPath, 5*time.Minute, 0, func(context.Context) (quota.Snapshot, error) { panic("read-only request unexpectedly fetched quota") })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ func TestStatusUsageRejectsInvalidFilters(t *testing.T) {
 }
 
 func TestStatusLimitReportsInitialFailureWithoutInventingQuota(t *testing.T) {
-	collector, err := Open(filepath.Join(t.TempDir(), "usage.jsonl"), 5*time.Minute, func(context.Context) (quota.Snapshot, error) {
+	collector, err := Open(filepath.Join(t.TempDir(), "usage.jsonl"), 5*time.Minute, 0, func(context.Context) (quota.Snapshot, error) {
 		return quota.Snapshot{}, fmt.Errorf("quota endpoint denied access")
 	})
 	if err != nil {
@@ -262,7 +262,7 @@ func newUpstreamService(cfg config.Config) *Service {
 	fetcher := quota.NewFetcher(quota.Transport{
 		AccessToken: func(context.Context) (string, error) { return cfg.AccessToken, nil },
 		ProjectID:   func() string { return cfg.ProjectID },
-		Post: func(ctx context.Context, token, path, accept, userAgent string, payload any) (*http.Response, error) {
+		Post: func(ctx context.Context, token, path, accept string, payload any) (*http.Response, error) {
 			body, err := json.Marshal(payload)
 			if err != nil {
 				return nil, err
@@ -274,7 +274,6 @@ func newUpstreamService(cfg config.Config) *Service {
 			request.Header.Set("Authorization", "Bearer "+token)
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("Accept", accept)
-			request.Header.Set("User-Agent", userAgent)
 			response, err := http.DefaultClient.Do(request)
 			if err != nil {
 				return nil, err

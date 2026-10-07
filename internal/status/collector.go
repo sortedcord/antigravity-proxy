@@ -1,10 +1,9 @@
-// Package status collects authoritative quota observations in an append-only
-// JSONL file. A history path must have exactly one server writer; separate
-// processes must not share it. History has no automatic retention policy.
+// Package status collects authoritative quota observations in bounded, durable
+// JSONL storage. A companion lock gives each history path one process owner;
+// retention preserves the most recently appended observations.
 package status
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"antigravity-proxy/internal/config"
 	"antigravity-proxy/internal/quota"
 )
 
@@ -33,8 +33,10 @@ type PollInfo struct {
 	LastError       string     `json:"last_error,omitempty"`
 }
 
-// historyFile is the storage surface used after loading. Production always uses
-// an os.File; tests can inject a failed Sync around that same real file.
+// historyFile is the storage surface used after loading. Production uses a
+// writable, non-append os.File so Windows permits truncation during recovery.
+// Appends seek to EOF while the collector owns its exclusive companion lock.
+// Tests can inject a failed Sync around that same real file.
 type historyFile interface {
 	io.Writer
 	io.Seeker
@@ -47,11 +49,16 @@ type historyFile interface {
 // Its public methods are safe for concurrent use. Returned data is independent
 // of collector state, including all optional pointer fields.
 type Collector struct {
-	mu       sync.RWMutex
-	file     historyFile
-	interval time.Duration
-	fetch    FetchFunc
-	samples  []quota.Snapshot
+	mu         sync.RWMutex
+	file       historyFile
+	path       string
+	tempPrefix string
+	lock       *historyLock
+	maxSamples int
+	storage    historyStorage
+	interval   time.Duration
+	fetch      FetchFunc
+	samples    []quota.Snapshot
 	// ordered holds sample indices in ascending observation-time order. Equal
 	// timestamps retain append order; descending queries reverse that order.
 	ordered    []int
@@ -66,67 +73,84 @@ type Collector struct {
 	closeErr   error
 }
 
-// Open creates owner-only history storage and reloads every stored observation.
-// It does not start a goroutine or fetch data. Corrupt or inaccessible storage is
-// a startup error, never a reason to silently fall back to in-memory history.
-func Open(path string, interval time.Duration, fetch FetchFunc) (*Collector, error) {
+// Open creates owner-only history storage and holds an exclusive companion lock
+// until Close. It recovers an incomplete final JSONL record, but any complete
+// malformed record remains a startup error. Retention keeps the last maxSamples
+// appends, independently of their observation times; zero uses the config default.
+// Parent-directory symlinks resolve to one storage/lock identity; the history
+// file and its companion lock may not themselves be symlinks. Abandoned private
+// compaction files for this history are removed under its lock at startup.
+// Open does not start a goroutine or fetch data.
+func Open(path string, interval time.Duration, maxSamples int, fetch FetchFunc) (*Collector, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("quota history path is empty")
 	}
 	if interval <= 0 {
 		return nil, errors.New("quota poll interval must be positive")
 	}
+	if maxSamples == 0 {
+		maxSamples = config.DefaultQuotaHistoryMaxSamples
+	}
+	if maxSamples < 1 {
+		return nil, errors.New("quota history max samples must be positive")
+	}
 	if fetch == nil {
 		return nil, errors.New("quota fetch function is nil")
+	}
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve quota history path: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return nil, fmt.Errorf("create quota history directory: %w", err)
 	}
-	if info, err := os.Stat(path); err == nil {
-		if !info.Mode().IsRegular() {
-			return nil, errors.New("quota history path must be a regular file")
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("inspect quota history: %w", err)
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
+	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
 	if err != nil {
-		return nil, fmt.Errorf("open quota history: %w", err)
+		return nil, fmt.Errorf("resolve quota history directory: %w", err)
 	}
-	fail := func(err error) (*Collector, error) {
-		file.Close()
+	path = filepath.Join(parent, filepath.Base(path))
+	if err := inspectHistoryPath(path); err != nil {
 		return nil, err
 	}
+	lock, err := lockHistory(path + ".lock")
+	if err != nil {
+		return nil, err
+	}
+	c := &Collector{
+		path: path, tempPrefix: historyTempPrefix(path), lock: lock, maxSamples: maxSamples, storage: defaultHistoryStorage(),
+		interval: interval, fetch: fetch, closeDone: make(chan struct{}),
+		polling: PollInfo{IntervalSeconds: int64(interval / time.Second)},
+	}
+	fail := func(err error) (*Collector, error) {
+		if c.file != nil {
+			_ = c.file.Close()
+		}
+		_ = lock.Close()
+		return nil, err
+	}
+	if err := inspectHistoryPath(path); err != nil {
+		return fail(err)
+	}
+	if err := c.cleanHistoryTemps(); err != nil {
+		return fail(err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return fail(fmt.Errorf("open quota history: %w", err))
+	}
+	c.file = file
 	if info, err := file.Stat(); err != nil || !info.Mode().IsRegular() {
 		return fail(errors.New("quota history must be a regular file"))
 	}
 	if err := file.Chmod(0600); err != nil {
 		return fail(fmt.Errorf("protect quota history: %w", err))
 	}
-	c := &Collector{file: file, interval: interval, fetch: fetch, closeDone: make(chan struct{}), polling: PollInfo{IntervalSeconds: int64(interval / time.Second)}}
-	reader := bufio.NewReader(file)
-	for line := 1; ; line++ {
-		record, readErr := reader.ReadBytes('\n')
-		if len(record) != 0 {
-			if record[len(record)-1] != '\n' {
-				return fail(fmt.Errorf("quota history line %d: incomplete JSONL record", line))
-			}
-			var sample quota.Snapshot
-			if err := json.Unmarshal(record, &sample); err != nil {
-				return fail(fmt.Errorf("quota history line %d: %w", line, err))
-			}
-			if err := validateSnapshot(sample); err != nil {
-				return fail(fmt.Errorf("quota history line %d: %w", line, err))
-			}
-			c.samples = append(c.samples, sample)
-			c.ordered = append(c.ordered, len(c.samples)-1)
-		}
-		if readErr != nil {
-			if !errors.Is(readErr, io.EOF) {
-				return fail(fmt.Errorf("read quota history: %w", readErr))
-			}
-			break
-		}
+	if err := c.loadHistory(file); err != nil {
+		return fail(err)
+	}
+	c.ordered = make([]int, len(c.samples))
+	for i := range c.ordered {
+		c.ordered[i] = i
 	}
 	sort.SliceStable(c.ordered, func(i, j int) bool {
 		return c.samples[c.ordered[i]].ObservedAt.Before(c.samples[c.ordered[j]].ObservedAt)
@@ -210,7 +234,23 @@ func (c *Collector) poll(ctx context.Context) {
 		return
 	}
 	index := len(c.samples)
-	c.samples = append(c.samples, sample)
+	if index == c.maxSamples {
+		// replaceHistory committed the retained appends plus this sample. Rebase
+		// the ordered index while dropping the oldest append, not the oldest time.
+		copy(c.samples, c.samples[1:])
+		index--
+		c.samples[index] = sample
+		n := 0
+		for _, old := range c.ordered {
+			if old != 0 {
+				c.ordered[n] = old - 1
+				n++
+			}
+		}
+		c.ordered = c.ordered[:n]
+	} else {
+		c.samples = append(c.samples, sample)
+	}
 	position := sort.Search(len(c.ordered), func(i int) bool {
 		return c.samples[c.ordered[i]].ObservedAt.After(sample.ObservedAt)
 	})
@@ -227,6 +267,9 @@ func (c *Collector) poll(ctx context.Context) {
 func (c *Collector) appendSample(sample quota.Snapshot) error {
 	if c.storeFault != nil {
 		return c.storeFault
+	}
+	if len(c.samples) == c.maxSamples {
+		return c.replaceHistory(c.samples[1:], &sample)
 	}
 	record, err := json.Marshal(sample)
 	if err != nil {
@@ -307,7 +350,10 @@ func (c *Collector) Close() error {
 		<-workerDone
 	}
 	c.mu.Lock()
-	c.closeErr = c.file.Close()
+	if c.file != nil {
+		c.closeErr = c.file.Close()
+	}
+	c.closeErr = errors.Join(c.closeErr, c.lock.Close())
 	close(c.closeDone)
 	err := c.closeErr
 	c.mu.Unlock()

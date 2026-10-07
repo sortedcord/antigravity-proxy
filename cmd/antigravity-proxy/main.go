@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -20,6 +21,27 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+	if len(os.Args) > 1 && (os.Args[1] == "help" || os.Args[1] == "-h" || os.Args[1] == "--help") {
+		fmt.Printf(`Antigravity Proxy
+
+Usage:
+  antigravity-proxy [serve]
+  antigravity-proxy login
+
+Environment:
+  HOST, PORT, API_KEY, ANTIGRAVITY_ACCESS_TOKEN, ANTIGRAVITY_REFRESH_TOKEN,
+  ANTIGRAVITY_OAUTH_CLIENT_ID, ANTIGRAVITY_OAUTH_CLIENT_SECRET,
+  ANTIGRAVITY_PROJECT_ID, ANTIGRAVITY_DAILY_ENDPOINT, ANTIGRAVITY_PROD_ENDPOINT,
+  ANTIGRAVITY_CLIENT_VERSION (default %s), OAUTH_CALLBACK_PORT,
+  ANTIGRAVITY_MAX_CONCURRENT_GENERATIONS (default %d),
+  ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS (default %d),
+  ANTIGRAVITY_QUOTA_HISTORY_PATH,
+  ANTIGRAVITY_QUOTA_HISTORY_MAX_SAMPLES (default %d)
+`, config.DefaultClientVersion, config.DefaultMaxConcurrentGenerations,
+			config.DefaultQuotaPollIntervalSeconds, config.DefaultQuotaHistoryMaxSamples)
+		return
+	}
 	cfg, path, err := config.Load()
 	if err != nil {
 		log.Fatal(err)
@@ -30,9 +52,6 @@ func main() {
 			if err := oauth.Login(cfg, path); err != nil {
 				log.Fatal(err)
 			}
-			return
-		case "help", "-h", "--help":
-			fmt.Println("Antigravity Proxy\n\nUsage:\n  antigravity-proxy [serve]\n  antigravity-proxy login\n\nEnvironment:\n  HOST, PORT, API_KEY, ANTIGRAVITY_ACCESS_TOKEN, ANTIGRAVITY_REFRESH_TOKEN,\n  ANTIGRAVITY_OAUTH_CLIENT_ID, ANTIGRAVITY_OAUTH_CLIENT_SECRET,\n  ANTIGRAVITY_PROJECT_ID, ANTIGRAVITY_DAILY_ENDPOINT, ANTIGRAVITY_PROD_ENDPOINT,\n  ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS (default 300), ANTIGRAVITY_QUOTA_HISTORY_PATH")
 			return
 		case "serve":
 		default:
