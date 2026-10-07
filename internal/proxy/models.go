@@ -49,7 +49,7 @@ type geminiModelCursor struct {
 }
 
 func (p *Proxy) fetchGeminiModels(ctx context.Context, token, projectID string) ([]geminiModel, error) {
-	resp, err := p.postToAntigravity(ctx, token, "/v1internal:fetchAvailableModels", "application/json", map[string]string{"project": projectID})
+	resp, err := p.postToAntigravity(ctx, token, "/v1internal:fetchAvailableModels", "application/json", "", map[string]string{"project": projectID})
 	if err != nil {
 		return nil, err
 	}

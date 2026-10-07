@@ -32,6 +32,9 @@ type Proxy struct {
 
 	projectMu sync.Mutex
 	projectID string
+
+	// StatusHandler is wired before serving; status owns its state and lifecycle.
+	StatusHandler http.Handler
 }
 
 type upstreamError struct {
@@ -44,8 +47,13 @@ func (e *upstreamError) Error() string {
 	return fmt.Sprintf("Antigravity returned HTTP %d: %s", e.Status, e.Body)
 }
 
+// HTTPStatus exposes the upstream status without requiring consumers to retain
+// or reveal its potentially credential-bearing response body.
+func (e *upstreamError) HTTPStatus() int { return e.Status }
+
 // New creates a Gemini upstream proxy with cfg without contacting Google.
-// It does not validate cfg; normal startup obtains it through config.Load.
+// Wire StatusHandler before serving quota routes. New does not validate cfg;
+// normal startup obtains it through config.Load.
 func New(cfg config.Config) *Proxy {
 	return &Proxy{
 		cfg:       cfg,
@@ -66,6 +74,12 @@ func (p *Proxy) accessToken(ctx context.Context) (string, error) {
 
 	p.tokenMu.Lock()
 	defer p.tokenMu.Unlock()
+	return p.accessTokenLocked(ctx)
+}
+
+// accessTokenLocked checks and refreshes the shared cache while tokenMu is held.
+// The caller owns the lock and supplies the refresh request's context.
+func (p *Proxy) accessTokenLocked(ctx context.Context) (string, error) {
 	if p.cachedToken != "" && time.Until(p.tokenExpiresAt) > time.Minute {
 		return p.cachedToken, nil
 	}
@@ -92,7 +106,7 @@ func (p *Proxy) endpoints() []string {
 	return []string{p.cfg.DailyEndpoint, p.cfg.ProdEndpoint}
 }
 
-func (p *Proxy) postToAntigravity(ctx context.Context, token, path, accept string, payload any) (*http.Response, error) {
+func (p *Proxy) postToAntigravity(ctx context.Context, token, path, accept, userAgent string, payload any) (*http.Response, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("encode Antigravity request: %w", err)
@@ -104,6 +118,9 @@ func (p *Proxy) postToAntigravity(ctx context.Context, token, path, accept strin
 			return nil, err
 		}
 		p.setUpstreamHeaders(req, token, accept)
+		if userAgent != "" {
+			req.Header.Set("User-Agent", userAgent)
+		}
 		resp, err := p.client.Do(req)
 		if err != nil {
 			if ctx.Err() != nil {

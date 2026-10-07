@@ -74,7 +74,7 @@ func (p *Proxy) handleGenerateContent(w http.ResponseWriter, r *http.Request, mo
 		path, accept = "/v1internal:streamGenerateContent?alt=sse", "text/event-stream"
 	}
 	// Carry caller cancellation into the upstream transport, including body reads.
-	resp, err := p.postToAntigravity(r.Context(), token, path, accept, payload)
+	resp, err := p.postToAntigravity(r.Context(), token, path, accept, "", payload)
 	if err != nil {
 		writeGeminiUpstreamError(w, err)
 		return

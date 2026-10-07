@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-// ServeHTTP serves local health, model discovery, and native Gemini generation.
+// ServeHTTP serves health, model discovery, native Gemini generation, and quota status.
 // Health is unauthenticated and does not probe Google; other supported routes
 // require the local API key when one is configured.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -22,6 +22,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		p.handleModels(w, r)
+	case r.URL.Path == "/status/limit" || r.URL.Path == "/status/usage":
+		if !p.authorized(w, r) {
+			return
+		}
+		p.StatusHandler.ServeHTTP(w, r)
 	case r.URL.Path == "/v1beta/models" || strings.HasPrefix(r.URL.Path, "/v1beta/models/"):
 		if !p.authorized(w, r) {
 			return
@@ -73,7 +78,7 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	resp, err := p.postToAntigravity(r.Context(), token, "/v1internal:fetchAvailableModels", "application/json", map[string]any{"project": projectID})
+	resp, err := p.postToAntigravity(r.Context(), token, "/v1internal:fetchAvailableModels", "application/json", "", map[string]any{"project": projectID})
 	if err != nil {
 		status := http.StatusBadGateway
 		var upstream *upstreamError

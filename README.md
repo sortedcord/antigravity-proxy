@@ -41,7 +41,7 @@ Set an API key before exposing the listener beyond the local machine:
 API_KEY='replace-with-a-long-random-value' HOST=0.0.0.0 ./antigravity-proxy serve
 ```
 
-Startup rejects a non-loopback `HOST` unless `API_KEY` is set. When configured, the local API key protects `/models` and every `/v1beta` endpoint. Send it in `x-api-key` or `Authorization: Bearer ...`; native Gemini endpoints also accept `x-goog-api-key` or the `key` query parameter. An unset key disables API-key authentication. `/health` remains unauthenticated and does not disclose credentials. This local key is never sent upstream: Cloud Code uses the service's Google OAuth credential.
+Startup rejects a non-loopback `HOST` unless `API_KEY` is set. When configured, the local API key protects `/models`, `/status/limit`, `/status/usage`, and every `/v1beta` endpoint. Send it in `x-api-key` or `Authorization: Bearer ...`; native Gemini and status endpoints also accept `x-goog-api-key` or the `key` query parameter. An unset key disables API-key authentication. `/health` remains unauthenticated and does not disclose credentials. This local key is never sent upstream: Cloud Code uses the service's Google OAuth credential.
 
 ## Docker
 
@@ -51,7 +51,7 @@ Build the image from the repository root:
 docker build -t antigravity-proxy .
 ```
 
-The multi-stage build produces a static Go executable. The minimal `scratch` runtime contains the executable and trusted CA certificates, runs as non-root UID/GID `10001:10001`, and has no shell, compiler, or `curl`. Its default command is `serve`; pass `login` explicitly to run OAuth login. Serving supports a read-only root filesystem and does not persist refreshed access tokens; only `login` writes the config file.
+The multi-stage build produces a static Go executable. The minimal `scratch` runtime contains the executable and trusted CA certificates, runs as non-root UID/GID `10001:10001`, and has no shell, compiler, or `curl`. Its default command is `serve`; pass `login` explicitly to run OAuth login. Serving supports a read-only root filesystem **only with a separate writable quota-history mount**. It does not persist refreshed access tokens or write the OAuth config; it does persist quota observations. The image precreates `/home/app/.local/share/antigravity-proxy` owned by `10001:10001` but does not declare an automatic Docker volume. Without writable history storage, serving fails at startup.
 
 Credentials belong at runtime, never in the image or build arguments. The `.dockerignore` allowlist excludes `.env` files, config files, Git history, assets, and local binaries from the build context. Do not add secrets to source files or otherwise include them in the build context.
 
@@ -68,6 +68,7 @@ export API_KEY ANTIGRAVITY_REFRESH_TOKEN ANTIGRAVITY_OAUTH_CLIENT_ID ANTIGRAVITY
 
 docker run --rm --name antigravity-proxy \
   --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  --mount type=volume,src=antigravity-quota-history,dst=/home/app/.local/share/antigravity-proxy \
   -p 127.0.0.1:8081:8080 \
   -e API_KEY \
   -e ANTIGRAVITY_REFRESH_TOKEN \
@@ -78,6 +79,8 @@ docker run --rm --name antigravity-proxy \
 
 Unlike the host executable, the image defaults to `HOST=0.0.0.0` and `PORT=8080` so Docker can reach the listener inside the container. `API_KEY` is therefore required: startup rejects this non-loopback listener without it, even if the published host port is loopback-only. The mapping above exposes container port `8080` at host `127.0.0.1:8081`; it does not change the container's `PORT`. Keep host publication loopback-only unless you intentionally configure secure remote access.
 
+The named `antigravity-quota-history` volume stores `usage.jsonl` and survives `--rm`; reuse it to retain observations across restarts. This example uses the image's default UID/GID. The image sets `ANTIGRAVITY_QUOTA_HISTORY_PATH=/home/app/.local/share/antigravity-proxy/usage.jsonl`, overriding any host-specific `quotaHistoryPath` saved in the mounted JSON config. To use a custom container history path, override this environment variable at runtime and mount its parent directory writable; changing only the JSON field is not enough. The root filesystem and any OAuth config mount can remain read-only.
+
 Check local health from the host with `curl http://127.0.0.1:8081/health`. For protected routes, send the same `API_KEY` in a supported authentication header. A directly supplied `ANTIGRAVITY_ACCESS_TOKEN` can replace the refresh-token flow, but it expires and is not refreshed automatically. Environment variables are visible to users with Docker access; keep that access restricted.
 
 ### Use an existing login config
@@ -87,18 +90,21 @@ The recommended login flow is to set the Google OAuth client variables and run `
 On native Linux with rootful Docker and no user-namespace remapping, run as your host UID/GID so the container can read the owner-only (`0600`) config file:
 
 ```sh
+mkdir -p "$HOME/.local/share/antigravity-proxy"
 docker run --rm --name antigravity-proxy \
   --user "$(id -u):$(id -g)" \
   --read-only --cap-drop=ALL --security-opt=no-new-privileges \
   --mount type=bind,src="$HOME/.config/antigravity-proxy",dst=/home/app/.config/antigravity-proxy,readonly \
+  --mount type=bind,src="$HOME/.local/share/antigravity-proxy",dst=/home/app/.local/share/antigravity-proxy \
   -p 127.0.0.1:8081:8080 \
   -e API_KEY \
   -e ANTIGRAVITY_OAUTH_CLIENT_ID \
   -e ANTIGRAVITY_OAUTH_CLIENT_SECRET \
+  -e ANTIGRAVITY_QUOTA_HISTORY_PATH=/home/app/.local/share/antigravity-proxy/usage.jsonl \
   antigravity-proxy
 ```
 
-The image keeps `HOME=/home/app` even when `--user` overrides its numeric identity. Rootless Docker and user-namespace remapping map host owners differently: use runtime token environment variables or a named volume owned by the appropriately mapped container user instead. Do not make credential files world-readable to work around ownership.
+The image keeps `HOME=/home/app` even when `--user` overrides its numeric identity. The writable history bind above is created by your host user so it matches the overridden UID/GID; do not reuse a volume owned by the image's `10001:10001` identity under a different UID. Rootless Docker and user-namespace remapping map host owners differently: use runtime token environment variables or a named volume owned by the appropriately mapped container user instead, with writable history storage owned by that same identity. Do not make credential files world-readable to work around ownership.
 
 Container login is optional. The OAuth callback binds to container loopback (`127.0.0.1`), so publishing `-p 51121:51121` on a bridge network does **not** make it reachable from the host browser. On native Linux with rootful Docker and no user-namespace remapping, host networking shares the host loopback and permits this alternative (with exported Google OAuth client variables):
 
@@ -114,7 +120,7 @@ docker run --rm --network host \
   antigravity-proxy login
 ```
 
-The login mount is writable so the token can be saved; switch back to the read-only serving mount afterward. Follow the authorization URL printed by `login` in your host browser. Do not assume this host-network callback flow is portable to Docker Desktop; host login is the recommended option.
+The login mount is writable so the token can be saved; switch back to the read-only config mount and separate writable history mount for serving afterward. `login` does not poll quotas or write history, so it needs no history mount. Follow the authorization URL printed by `login` in your host browser. Do not assume this host-network callback flow is portable to Docker Desktop; host login is the recommended option.
 
 ### Connect Bifrost
 
@@ -128,6 +134,8 @@ If Bifrost is also containerized, attach both containers to the same user-define
 | --- | --- |
 | `GET /health` | Local health and whether a Google credential is configured; unauthenticated |
 | `GET /models` | Raw Cloud Code `fetchAvailableModels` JSON, unchanged |
+| `GET /status/limit` | Latest persisted quota snapshot for Gemini and the shared Claude/GPT/other pool, with five-hour and weekly windows, polling metadata, and staleness |
+| `GET /status/usage` | Filtered, paginated history of observed quota windows, not billable request/token usage |
 | `GET /v1beta/models` | Native Gemini model list with `pageSize`, `pageToken`, and `nextPageToken` pagination |
 | `GET /v1beta/models/{id}` | Native Gemini metadata for one catalog model |
 | `POST /v1beta/models/{id}:generateContent` | Native Gemini generation request and response |
@@ -222,17 +230,117 @@ Not implemented: Anthropic Messages or OpenAI endpoints, `countTokens`, embeddin
 
 Send a video through `generateContent` as a native content part with `inlineData.mimeType: "video/mp4"` and `inlineData.data` containing the base64-encoded MP4 bytes. Put the question in a separate text part of the same content entry. The proxy forwards the video without extracting frames or transcoding it. The 50 MiB request-body limit includes base64 expansion and JSON overhead; file uploads are not implemented. Sending a video URL as ordinary text is not equivalent to sending video bytes.
 
+## Quota status and history
+
+`serve` polls the same Google account used for generation through the internal `retrieveUserQuotaSummary` endpoint: immediately on startup, then every **300 seconds (five minutes)** by default. Set `quotaPollIntervalSeconds` or `ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS` to a positive integer number of seconds; zero does not disable polling. One worker polls without overlapping requests. Status reads use the persisted cache and **do not fetch upstream or add observations**. Neither `login` nor help starts polling. An installed Antigravity CLI is not a runtime dependency.
+
+Both status routes require the same local `API_KEY` when configured, return raw status JSON (not a Gemini RPC envelope), and send `Cache-Control: no-store`. Only `GET` is supported; other methods return `405`.
+
+```sh
+curl "$ANTIGRAVITY_PROXY_URL/status/limit" \
+  -H "x-api-key: $ANTIGRAVITY_PROXY_API_KEY"
+
+# Illustrative UTC range; curl URL-encodes each query value.
+curl --get "$ANTIGRAVITY_PROXY_URL/status/usage" \
+  -H "x-api-key: $ANTIGRAVITY_PROXY_API_KEY" \
+  --data-urlencode 'from=2026-01-01T00:00:00Z' \
+  --data-urlencode 'to=2026-01-02T00:00:00Z' \
+  --data-urlencode 'pool=third_party' \
+  --data-urlencode 'window=weekly' \
+  --data-urlencode 'limit=100' \
+  --data-urlencode 'offset=0' \
+  --data-urlencode 'order=desc'
+```
+
+Illustrative `/status/limit` response only; these dates and values are not account data or promised allowances:
+
+```json
+{
+  "observed_at": "2026-01-01T12:00:00Z",
+  "source": "retrieveUserQuotaSummary",
+  "pools": {
+    "gemini": {
+      "id": "gemini", "display_name": "Gemini",
+      "five_hour": {
+        "bucket_id": "gemini-5h", "window": "5h", "status": "available", "disabled": false,
+        "remaining_fraction": 0.6, "remaining_percent": 60, "used_percent": 40,
+        "remaining_amount": null, "reset_at": "2026-01-01T15:00:00Z"
+      },
+      "weekly": {
+        "bucket_id": "gemini-weekly", "window": "weekly", "status": "available", "disabled": false,
+        "remaining_fraction": 0.8, "remaining_percent": 80, "used_percent": 20,
+        "remaining_amount": null, "reset_at": "2026-01-05T12:00:00Z"
+      }
+    },
+    "third_party": {
+      "id": "third_party", "display_name": "Claude / GPT / other",
+      "five_hour": {
+        "bucket_id": "3p-5h", "window": "5h", "status": "available", "disabled": false,
+        "remaining_fraction": 0.4, "remaining_percent": 40, "used_percent": 60,
+        "remaining_amount": null, "reset_at": "2026-01-01T16:00:00Z"
+      },
+      "weekly": {
+        "bucket_id": "3p-weekly", "window": "weekly", "status": "available", "disabled": false,
+        "remaining_fraction": 0.7, "remaining_percent": 70, "used_percent": 30,
+        "remaining_amount": null, "reset_at": "2026-01-06T12:00:00Z"
+      }
+    }
+  },
+  "polling": {
+    "interval_seconds": 300,
+    "last_attempt_at": "2026-01-01T12:00:00Z",
+    "last_success_at": "2026-01-01T12:00:00Z"
+  },
+  "stale": false
+}
+```
+
+All four windows are represented. `status` is `available`, `disabled`, or `unavailable`; disabled or missing/invalid upstream data has unusable values represented as `null` and an `unavailable_reason` (for example, `upstream_disabled` or `not_reported`). A valid remaining fraction of zero means exhausted quota, not missing data. Percentages derive only from a valid upstream fraction; `remaining_amount`, if supplied, is a decimal string without invented units. Reset times come only from upstream and may be `null`. The proxy does not infer weekly limits from model metadata or fabricate refresh times.
+
+`stale` is true when the observation is older than the configured interval or the latest polling attempt failed. `polling` reports the interval, nullable attempt/success timestamps, and `last_error` when present. Before any successful persisted observation, `/status/limit` returns `503` with an error and polling metadata. A failed fetch or save retains the last good snapshot, marked stale; a restart reloads persisted history before the next fetch completes.
+
+### History queries
+
+| Parameter | Accepted values | Default |
+| --- | --- | --- |
+| `from` | Inclusive observation-time lower bound; RFC3339 with timezone | no lower bound |
+| `to` | Inclusive observation-time upper bound; RFC3339 with timezone, not before `from` | no upper bound |
+| `pool` | `all`, `gemini`, `third_party` | `all` |
+| `window` | `all`, `5h`, `weekly` | `all` |
+| `limit` | Integer `1`–`1000` | `100` |
+| `offset` | Integer `0` or greater | `0` |
+| `order` | `asc`, `desc` by observation time | `desc` |
+
+Unknown or duplicate parameters, empty values, and invalid values return `400`. When using query-key authentication, `key` is also accepted as the local API key. Fix a `to` timestamp for all pages of a query so new polls cannot shift the result set while you paginate.
+
+`/status/usage` returns `entries`, `total` (matching window entries before pagination), `limit`, `offset`, nullable `next_offset`, `order`, selected `pool`/`window`, optional `from`/`to`, and `polling`. Each entry is one selected window from one observation: `observed_at`, `pool`, `pool_display_name`, plus the flat window fields shown above. Thus one poll contributes up to four entries, including disabled/unavailable windows with null values. An empty result has `entries: []`; follow `next_offset` until it is `null`.
+
+This is **quota observation history, not billable usage**. `used_percent` describes the consumed share of the current upstream quota bucket; it is not a count of proxy requests, tokens, or credits. History is not resampled, and differences between snapshots are not reported as consumption: resets and other account activity can change quota between polls.
+
+### Persistence and account scope
+
+Observations are appended to owner-only JSONL at `$HOME/.local/share/antigravity-proxy/usage.jsonl` by default, independently of the OAuth config. Override with `quotaHistoryPath` or nonempty `ANTIGRAVITY_QUOTA_HISTORY_PATH`. Each successful observation is synced to disk before publication. Serving fails explicitly if history is corrupt or cannot be opened for writing; there is no silent in-memory fallback. SIGINT/SIGTERM stop polling and close storage.
+
+History is retained indefinitely without automatic pruning and loaded into memory on startup; plan disk and memory capacity accordingly. Use **one server writer per history path**. The service supports one Google account, and the file is not an account-partitioned database: choose a separate history path/volume when changing Google credentials so observations from different accounts are not mixed. Protect and back up history as account-related data; it does not contain OAuth tokens.
+
+For authoritative product policy and model availability, see Google's [Antigravity Plans](https://antigravity.google/docs/plans), [Models](https://antigravity.google/docs/models), and [CLI model quotas (`/usage`)](https://antigravity.google/docs/cli/commands/usage/). Those pages describe the product, not a supported public quota API contract. This proxy uses an internal endpoint, and quotas/availability can change upstream.
+
+
 ## Project layout
 
 ```text
-cmd/antigravity-proxy/main.go   CLI entry point and HTTP server startup
+cmd/antigravity-proxy/main.go   CLI entry point, service composition, and shutdown
 internal/config/              Configuration loading, validation, and persistence
 internal/oauth/               Google OAuth login and token exchange
-internal/proxy/               Antigravity discovery and native Gemini HTTP bridge
+internal/proxy/               Shared Google transport/caches, authentication, and native Gemini routing
+internal/quota/               Quota fetching, request identity, safe errors, and snapshot parsing
+internal/status/              Status HTTP API, polling lifecycle, durable history, and queries
 go.mod                        Module definition
 ```
 
 Tests live alongside the package they exercise. `cmd/` contains the executable; `internal/` packages are implementation details, not a public library API. Keep new code with the package that owns its behavior, and introduce another package only when it has a distinct responsibility.
+
+The command explicitly composes the services: `proxy.New(cfg)` owns the shared Google account transport; `Proxy.QuotaFetcher()` connects it to `quota.Fetcher`; `status.NewService(cfg, fetcher.Fetch)` owns the collector and status endpoints. Wire the service into `Proxy.StatusHandler` before serving, then start and close it from the command lifecycle. Proxy authenticates status requests before delegation but does not own polling or history state. Quota polling reuses the native token/project caches without initiating project discovery or waiting on unrelated refresh/discovery locks.
 
 Run all package tests and static checks from the repository root:
 
@@ -253,9 +361,13 @@ The optional JSON file is `~/.config/antigravity-proxy/config.json`:
   "host": "127.0.0.1",
   "apiKey": "",
   "refreshToken": "",
-  "projectId": ""
+  "projectId": "",
+  "quotaPollIntervalSeconds": 300,
+  "quotaHistoryPath": "/home/your-user/.local/share/antigravity-proxy/usage.jsonl"
 }
 ```
+
+The history path above is illustrative: replace it with a writable path for your runtime user, or omit `quotaHistoryPath` to use `$HOME/.local/share/antigravity-proxy/usage.jsonl`. JSON paths do not expand `$HOME`. The Docker image explicitly sets `ANTIGRAVITY_QUOTA_HISTORY_PATH` to `/home/app/.local/share/antigravity-proxy/usage.jsonl`, which takes precedence over JSON; a custom container path requires a runtime environment override and a matching writable mount. `quotaPollIntervalSeconds` must be a positive integer; its default is `300`.
 
 Environment variables override file values:
 
@@ -263,7 +375,7 @@ Environment variables override file values:
 | --- | --- | --- |
 | `HOST` | Listen address | `127.0.0.1` |
 | `PORT` | Listen port | `8080` |
-| `API_KEY` | Protect `/models` and all `/v1beta` endpoints; unset disables API-key auth (`/health` stays public) | unset |
+| `API_KEY` | Protect `/models`, `/status/limit`, `/status/usage`, and all `/v1beta` endpoints; unset disables API-key auth (`/health` stays public) | unset |
 | `ANTIGRAVITY_ACCESS_TOKEN` | Use a supplied access token instead of refreshing OAuth | unset |
 | `ANTIGRAVITY_REFRESH_TOKEN` | Google OAuth refresh token | config file / login |
 | `ANTIGRAVITY_OAUTH_CLIENT_ID` | Google OAuth client ID used for login and refresh | required for OAuth login/refresh |
@@ -273,9 +385,11 @@ Environment variables override file values:
 | `ANTIGRAVITY_PROD_ENDPOINT` | Production Cloud Code endpoint override | `https://cloudcode-pa.googleapis.com` |
 | `ANTIGRAVITY_CLIENT_VERSION` | Client version sent in Antigravity headers | `1.15.8` |
 | `OAUTH_CALLBACK_PORT` | Preferred localhost OAuth callback port; fallback ports are tried if busy | `51121` |
+| `ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS` | Positive integer polling interval in seconds; zero is invalid | `300` |
+| `ANTIGRAVITY_QUOTA_HISTORY_PATH` | Nonempty writable JSONL history path, separate from the OAuth config | `$HOME/.local/share/antigravity-proxy/usage.jsonl`; image explicitly sets `/home/app/.local/share/antigravity-proxy/usage.jsonl` |
 
 Cloud Code endpoint overrides must use HTTPS. Plain HTTP is accepted only for `localhost` or loopback addresses, so local stub servers can be used without sending tokens over a network connection.
 
 When a refresh token is configured, the service refreshes and caches its Google access token as needed. A directly supplied access token is not refreshed automatically. Configuration files created by `login` are written with mode `0600`.
 
-Cloud Code requests fall back from the daily endpoint to production when the first endpoint fails before a successful response; streaming requests are never replayed after successful SSE begins. The service supports one Google account and does not include quota tracking or an automatic retry/cooldown policy.
+Cloud Code requests fall back from the daily endpoint to production when the first endpoint fails before a successful response; streaming requests are never replayed after successful SSE begins. The service supports one Google account, observes its upstream quota on a fixed polling schedule, and does not include an automatic generation retry/cooldown policy.

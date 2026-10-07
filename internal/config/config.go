@@ -10,10 +10,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
+// DefaultQuotaPollIntervalSeconds is the default interval between quota observations.
+const DefaultQuotaPollIntervalSeconds = 300
+
 // Config holds listener settings, client authentication, Google credentials,
-// and Antigravity project and endpoint settings.
+// Antigravity project and endpoint settings, and quota polling settings.
 type Config struct {
 	Port int    `json:"port"`
 	Host string `json:"host"`
@@ -25,25 +29,27 @@ type Config struct {
 	ProjectID     string `json:"projectId,omitempty"`
 	DailyEndpoint string `json:"dailyEndpoint,omitempty"`
 	ProdEndpoint  string `json:"prodEndpoint,omitempty"`
-}
-
-func configPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".config", "antigravity-proxy", "config.json"), nil
+	// QuotaPollIntervalSeconds is the positive interval between quota polls in seconds.
+	QuotaPollIntervalSeconds int `json:"quotaPollIntervalSeconds,omitempty"`
+	// QuotaHistoryPath is the JSONL file used to persist quota observations.
+	QuotaHistoryPath string `json:"quotaHistoryPath,omitempty"`
 }
 
 // Load reads ~/.config/antigravity-proxy/config.json, applies defaults and
-// environment overrides, and validates listener and upstream settings.
+// environment overrides, and validates listener, upstream, and quota settings.
 // It returns the configuration and its persistence path; a missing file is allowed.
 func Load() (Config, string, error) {
-	path, err := configPath()
+	home, err := os.UserHomeDir()
 	if err != nil {
 		return Config{}, "", err
 	}
-	cfg := Config{Port: 8080, Host: "127.0.0.1"}
+	path := filepath.Join(home, ".config", "antigravity-proxy", "config.json")
+	cfg := Config{
+		Port:                     8080,
+		Host:                     "127.0.0.1",
+		QuotaPollIntervalSeconds: DefaultQuotaPollIntervalSeconds,
+		QuotaHistoryPath:         filepath.Join(home, ".local", "share", "antigravity-proxy", "usage.jsonl"),
+	}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return Config{}, "", fmt.Errorf("read config %s: %w", path, err)
@@ -92,6 +98,21 @@ func Load() (Config, string, error) {
 	}
 	if err := validateCloudEndpoint("ANTIGRAVITY_PROD_ENDPOINT", cfg.ProdEndpoint); err != nil {
 		return Config{}, "", err
+	}
+	if value, ok := os.LookupEnv("ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS"); ok {
+		seconds, err := strconv.Atoi(value)
+		if err != nil {
+			return Config{}, "", fmt.Errorf("ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS must be a positive integer number of seconds")
+		}
+		cfg.QuotaPollIntervalSeconds = seconds
+	}
+	const maxQuotaPollIntervalSeconds = int64((1<<63 - 1) / time.Second)
+	if cfg.QuotaPollIntervalSeconds <= 0 || int64(cfg.QuotaPollIntervalSeconds) > maxQuotaPollIntervalSeconds {
+		return Config{}, "", fmt.Errorf("quotaPollIntervalSeconds must be a positive integer no greater than %d seconds", maxQuotaPollIntervalSeconds)
+	}
+	envString("ANTIGRAVITY_QUOTA_HISTORY_PATH", &cfg.QuotaHistoryPath)
+	if strings.TrimSpace(cfg.QuotaHistoryPath) == "" {
+		return Config{}, "", fmt.Errorf("quotaHistoryPath must not be empty")
 	}
 	return cfg, path, nil
 }
