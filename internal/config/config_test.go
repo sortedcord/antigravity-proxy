@@ -59,6 +59,7 @@ func isolatedLoadHome(t *testing.T) string {
 	for _, name := range []string{
 		"HOST", "PORT", "API_KEY",
 		"ANTIGRAVITY_ACCESS_TOKEN", "ANTIGRAVITY_REFRESH_TOKEN",
+		"ANTIGRAVITY_OAUTH_CLIENT_ID", "ANTIGRAVITY_OAUTH_CLIENT_SECRET",
 		"ANTIGRAVITY_PROJECT_ID", "ANTIGRAVITY_DAILY_ENDPOINT", "ANTIGRAVITY_PROD_ENDPOINT",
 		"ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS", "ANTIGRAVITY_QUOTA_HISTORY_PATH",
 	} {
@@ -301,5 +302,103 @@ func TestSaveQuotaConfigurationRoundTrip(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Dir(cfg.QuotaHistoryPath)); !os.IsNotExist(err) {
 		t.Fatalf("Load or Save created history storage: %v", err)
+	}
+}
+
+func TestLoadOAuthPairPrecedenceAndRoundTrip(t *testing.T) {
+	home := isolatedLoadHome(t)
+	id, secret := t.Name()+"-id", t.Name()+"-value"
+	path := filepath.Join(home, ".config", "antigravity-proxy", "config.json")
+	if err := Save(path, Config{OAuthClientID: id, OAuthClientSecret: secret, RefreshToken: t.Name() + "-refresh", QuotaPollIntervalSeconds: 300}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := Load()
+	if err != nil || cfg.OAuthClientID != id || cfg.OAuthClientSecret != secret || cfg.RefreshToken == "" {
+		t.Fatal("saved OAuth pair did not survive loading with its refresh token")
+	}
+	envID, envSecret := t.Name()+"-override-id", t.Name()+"-override-value"
+	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_ID", "  "+envID+"  ")
+	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET", "  "+envSecret+"  ")
+	cfg, _, err = Load()
+	if err != nil || cfg.OAuthClientID != envID || cfg.OAuthClientSecret != envSecret {
+		t.Fatal("whole environment OAuth pair did not override saved pair")
+	}
+	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET", "")
+	cfg, _, err = Load()
+	if err != nil || cfg.OAuthClientID != envID || cfg.OAuthClientSecret != "" {
+		t.Fatal("partial environment source was rejected or mixed during loading")
+	}
+	if _, _, err := cfg.OAuthCredentials(); err == nil || !strings.Contains(err.Error(), "provided together") {
+		t.Fatal("OAuth use accepted a partial environment pair")
+	}
+}
+
+func TestLoadDefersPartialSavedOAuthPairValidation(t *testing.T) {
+	for _, field := range []string{"oauthClientId", "oauthClientSecret"} {
+		t.Run(field, func(t *testing.T) {
+			home := isolatedLoadHome(t)
+			writeLoadConfig(t, home, `{"`+field+`":"synthetic-test-value"}`)
+			cfg, _, err := Load()
+			if err != nil {
+				t.Fatal("Load unnecessarily validated unused OAuth credentials")
+			}
+			if _, _, err := cfg.OAuthCredentials(); err == nil || !strings.Contains(err.Error(), "provided together") {
+				t.Fatal("OAuth use accepted a partial saved pair")
+			}
+			t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_ID", t.Name()+"-id")
+			t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET", t.Name()+"-value")
+			cfg, _, err = Load()
+			if err != nil {
+				t.Fatal("complete environment pair could not replace partial saved pair")
+			}
+			if _, _, err := cfg.OAuthCredentials(); err != nil {
+				t.Fatal("complete environment pair was not usable after loading")
+			}
+		})
+	}
+}
+
+func TestLoadDefersSinglyPresentEmptyOAuthOverrideValidation(t *testing.T) {
+	for _, name := range []string{"ANTIGRAVITY_OAUTH_CLIENT_ID", "ANTIGRAVITY_OAUTH_CLIENT_SECRET"} {
+		t.Run(name, func(t *testing.T) {
+			isolatedLoadHome(t)
+			t.Setenv(name, "")
+			cfg, _, err := Load()
+			if err != nil {
+				t.Fatal("Load unnecessarily validated unused OAuth override")
+			}
+			if _, _, err := cfg.OAuthCredentials(); err == nil || !strings.Contains(err.Error(), "provided together") {
+				t.Fatal("OAuth use silently ignored a singly present empty override")
+			}
+		})
+	}
+}
+
+func TestLoadExplicitAccessTokenBypassesPartialOAuthEnvironment(t *testing.T) {
+	for _, envName := range []string{"ANTIGRAVITY_OAUTH_CLIENT_ID", "ANTIGRAVITY_OAUTH_CLIENT_SECRET"} {
+		t.Run(envName, func(t *testing.T) {
+			home := isolatedLoadHome(t)
+			path := filepath.Join(home, ".config", "antigravity-proxy", "config.json")
+			if err := Save(path, Config{OAuthClientID: t.Name() + "-saved-id", OAuthClientSecret: t.Name() + "-saved-value", QuotaPollIntervalSeconds: 300}); err != nil {
+				t.Fatal(err)
+			}
+			token := t.Name() + "-synthetic-access"
+			t.Setenv("ANTIGRAVITY_ACCESS_TOKEN", token)
+			t.Setenv(envName, t.Name()+"-partial-override")
+			cfg, _, err := Load()
+			if err != nil || cfg.AccessToken != token {
+				t.Fatal("Load rejected explicit access token because of unused partial OAuth environment")
+			}
+			if envName == "ANTIGRAVITY_OAUTH_CLIENT_ID" {
+				if cfg.OAuthClientID == "" || cfg.OAuthClientSecret != "" {
+					t.Fatal("Load mixed partial environment ID with saved client secret")
+				}
+			} else if cfg.OAuthClientID != "" || cfg.OAuthClientSecret == "" {
+				t.Fatal("Load mixed partial environment secret with saved client ID")
+			}
+			if _, _, err := cfg.OAuthCredentials(); err == nil {
+				t.Fatal("deferred OAuth use accepted the partial environment pair")
+			}
+		})
 	}
 }

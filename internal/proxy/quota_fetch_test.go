@@ -413,3 +413,25 @@ func TestFetchQuotaSnapshotSkipsBusyTokenRefreshAndRecovers(t *testing.T) {
 		t.Fatalf("following quota fetch failed to reuse fresh cache: %v, calls = %d", err, calls.Load())
 	}
 }
+
+func TestExplicitAccessTokenBypassesOAuthCredentialResolution(t *testing.T) {
+	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_ID", t.Name()+"-partial-id")
+	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET", "")
+	cfg := config.Config{AccessToken: t.Name() + "-access", RefreshToken: t.Name() + "-refresh", OAuthClientSecret: t.Name() + "-partial-value"}
+	p := New(cfg)
+	got, err := p.accessToken(context.Background())
+	if err != nil || got != cfg.AccessToken {
+		t.Fatal("explicit access token attempted OAuth credential resolution")
+	}
+}
+
+func TestQuotaAuthenticationSanitizesMissingSavedOAuthPair(t *testing.T) {
+	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_ID", "")
+	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET", "")
+	cfg := config.Config{RefreshToken: t.Name() + "-refresh", OAuthClientID: t.Name() + "-partial-id"}
+	p := New(cfg)
+	_, err := p.QuotaFetcher().Fetch(context.Background())
+	if err == nil || strings.Contains(err.Error(), cfg.RefreshToken) || strings.Contains(err.Error(), cfg.OAuthClientID) || strings.Contains(err.Error(), "oauthClient") {
+		t.Fatal("quota authentication revealed details of an incomplete saved OAuth pair")
+	}
+}

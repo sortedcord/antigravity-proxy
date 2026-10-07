@@ -24,7 +24,11 @@ go build -o antigravity-proxy ./cmd/antigravity-proxy
 
 `login` prints Google's authorization URL and waits for a loopback OAuth callback (port `51121` by default, with fallback ports if busy). The resulting refresh token is stored in `~/.config/antigravity-proxy/config.json` with owner-only file permissions. You can use `go run ./cmd/antigravity-proxy login` and `go run ./cmd/antigravity-proxy serve` instead.
 
-OAuth login and refresh-token exchange require a Google OAuth client ID and client secret provided as `ANTIGRAVITY_OAUTH_CLIENT_ID` and `ANTIGRAVITY_OAUTH_CLIENT_SECRET`. Set these in the environment for `login` and for any service process that must refresh an access token. They are intentionally not stored in the repository or config file.
+`login` obtains a complete OAuth client pair from environment overrides, then the saved config, then an installed `agy` found on `PATH` or at `$HOME/.local/bin/agy`. If no binary is installed, it follows the download-only flow from the [official CLI installer](https://antigravity.google/cli/install.sh): fetch the platform manifest and payload over HTTPS, verify the manifest's SHA-512 checksum, and read the native binary from private temporary storage. It never runs the installer or binary, installs `agy`, or changes shell configuration. Temporary downloads are removed after discovery.
+
+The native binary is scanned for client IDs and secrets; when multiple identities exist, its Cloud Code OAuth initializer references determine the pair rather than string order or proximity. Unsupported or ambiguous binary layouts fail explicitly; update `agy` or supply both `ANTIGRAVITY_OAUTH_CLIENT_ID` and `ANTIGRAVITY_OAUTH_CLIENT_SECRET`. Automatic downloads follow the installer's Linux/macOS/Android amd64/arm64 manifests (including Linux musl); release availability remains upstream-controlled.
+
+Successful login saves the exact client pair as `oauthClientId` / `oauthClientSecret` alongside the resulting token in the owner-only config file. Serving and token refresh use this saved pair and never discover/download a CLI, so a mounted login config also works in the scratch Docker image. Explicit environment credentials must be supplied as a complete pair and override the saved pair without mixing fields. Legacy configs with a refresh token but no client pair need another `login` or the original issuing-client pair; a new OAuth client cannot refresh a token issued to another client.
 
 The service listens on `127.0.0.1:8080` by default:
 
@@ -85,7 +89,7 @@ Check local health from the host with `curl http://127.0.0.1:8081/health`. For p
 
 ### Use an existing login config
 
-The recommended login flow is to set the Google OAuth client variables and run `./antigravity-proxy login` on the host as described above. Then mount the resulting config directory read-only for serving instead of passing `ANTIGRAVITY_REFRESH_TOKEN`. The OAuth client variables are still required at runtime to refresh the saved token.
+Run `./antigravity-proxy login` on the host as described above; client discovery is automatic unless a complete environment or saved pair is configured. Then mount the resulting config directory read-only for serving instead of passing `ANTIGRAVITY_REFRESH_TOKEN`. The saved client pair travels with the refresh token, so OAuth client environment variables are not required in this example.
 
 On native Linux with rootful Docker and no user-namespace remapping, run as your host UID/GID so the container can read the owner-only (`0600`) config file:
 
@@ -98,25 +102,22 @@ docker run --rm --name antigravity-proxy \
   --mount type=bind,src="$HOME/.local/share/antigravity-proxy",dst=/home/app/.local/share/antigravity-proxy \
   -p 127.0.0.1:8081:8080 \
   -e API_KEY \
-  -e ANTIGRAVITY_OAUTH_CLIENT_ID \
-  -e ANTIGRAVITY_OAUTH_CLIENT_SECRET \
   -e ANTIGRAVITY_QUOTA_HISTORY_PATH=/home/app/.local/share/antigravity-proxy/usage.jsonl \
   antigravity-proxy
 ```
 
 The image keeps `HOME=/home/app` even when `--user` overrides its numeric identity. The writable history bind above is created by your host user so it matches the overridden UID/GID; do not reuse a volume owned by the image's `10001:10001` identity under a different UID. Rootless Docker and user-namespace remapping map host owners differently: use runtime token environment variables or a named volume owned by the appropriately mapped container user instead, with writable history storage owned by that same identity. Do not make credential files world-readable to work around ownership.
 
-Container login is optional. The OAuth callback binds to container loopback (`127.0.0.1`), so publishing `-p 51121:51121` on a bridge network does **not** make it reachable from the host browser. On native Linux with rootful Docker and no user-namespace remapping, host networking shares the host loopback and permits this alternative (with exported Google OAuth client variables):
+Container login is optional. The OAuth callback binds to container loopback (`127.0.0.1`), so publishing `-p 51121:51121` on a bridge network does **not** make it reachable from the host browser. On native Linux with rootful Docker and no user-namespace remapping, host networking shares the host loopback and permits this alternative. It uses automatic CLI download/discovery and a writable temporary filesystem (nothing is installed):
 
 ```sh
 mkdir -p "$HOME/.config/antigravity-proxy"
 docker run --rm --network host \
   --user "$(id -u):$(id -g)" \
   --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=1g \
   --mount type=bind,src="$HOME/.config/antigravity-proxy",dst=/home/app/.config/antigravity-proxy \
   -e HOST=127.0.0.1 \
-  -e ANTIGRAVITY_OAUTH_CLIENT_ID \
-  -e ANTIGRAVITY_OAUTH_CLIENT_SECRET \
   antigravity-proxy login
 ```
 
@@ -361,6 +362,8 @@ The optional JSON file is `~/.config/antigravity-proxy/config.json`:
   "host": "127.0.0.1",
   "apiKey": "",
   "refreshToken": "",
+  "oauthClientId": "",
+  "oauthClientSecret": "",
   "projectId": "",
   "quotaPollIntervalSeconds": 300,
   "quotaHistoryPath": "/home/your-user/.local/share/antigravity-proxy/usage.jsonl"
@@ -378,8 +381,8 @@ Environment variables override file values:
 | `API_KEY` | Protect `/models`, `/status/limit`, `/status/usage`, and all `/v1beta` endpoints; unset disables API-key auth (`/health` stays public) | unset |
 | `ANTIGRAVITY_ACCESS_TOKEN` | Use a supplied access token instead of refreshing OAuth | unset |
 | `ANTIGRAVITY_REFRESH_TOKEN` | Google OAuth refresh token | config file / login |
-| `ANTIGRAVITY_OAUTH_CLIENT_ID` | Google OAuth client ID used for login and refresh | required for OAuth login/refresh |
-| `ANTIGRAVITY_OAUTH_CLIENT_SECRET` | Google OAuth client secret used for login and refresh | required for OAuth login/refresh |
+| `ANTIGRAVITY_OAUTH_CLIENT_ID` | Complete-pair override for the issuing Google OAuth client | saved config; automatic discovery during login |
+| `ANTIGRAVITY_OAUTH_CLIENT_SECRET` | Complete-pair override for the issuing Google OAuth client secret | saved config; automatic discovery during login |
 | `ANTIGRAVITY_PROJECT_ID` | Explicit Cloud Code project ID | auto-discovery |
 | `ANTIGRAVITY_DAILY_ENDPOINT` | Daily Cloud Code endpoint override | `https://daily-cloudcode-pa.googleapis.com` |
 | `ANTIGRAVITY_PROD_ENDPOINT` | Production Cloud Code endpoint override | `https://cloudcode-pa.googleapis.com` |
@@ -390,6 +393,6 @@ Environment variables override file values:
 
 Cloud Code endpoint overrides must use HTTPS. Plain HTTP is accepted only for `localhost` or loopback addresses, so local stub servers can be used without sending tokens over a network connection.
 
-When a refresh token is configured, the service refreshes and caches its Google access token as needed. A directly supplied access token is not refreshed automatically. Configuration files created by `login` are written with mode `0600`.
+When a refresh token is configured, the service refreshes and caches its Google access token as needed using the saved or explicitly supplied client pair. A directly supplied access token bypasses client discovery/resolution and is not refreshed automatically. Configuration files created by `login`, including the client pair and account tokens, are written with mode `0600`; do not commit or bake them into images.
 
 Cloud Code requests fall back from the daily endpoint to production when the first endpoint fails before a successful response; streaming requests are never replayed after successful SSE begins. The service supports one Google account, observes its upstream quota on a fixed polling schedule, and does not include an automatic generation retry/cooldown policy.

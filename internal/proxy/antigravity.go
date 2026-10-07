@@ -83,7 +83,7 @@ func (p *Proxy) accessTokenLocked(ctx context.Context) (string, error) {
 	if p.cachedToken != "" && time.Until(p.tokenExpiresAt) > time.Minute {
 		return p.cachedToken, nil
 	}
-	tokens, err := oauth.Refresh(ctx, p.cfg.RefreshToken)
+	tokens, err := oauth.Refresh(ctx, p.cfg)
 	if err != nil {
 		return "", err
 	}

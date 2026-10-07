@@ -24,11 +24,14 @@ type Config struct {
 	// APIKey authenticates proxy clients, not requests to Google.
 	APIKey string `json:"apiKey,omitempty"`
 	// AccessToken takes precedence over RefreshToken and is not refreshed.
-	AccessToken   string `json:"accessToken,omitempty"`
-	RefreshToken  string `json:"refreshToken,omitempty"`
-	ProjectID     string `json:"projectId,omitempty"`
-	DailyEndpoint string `json:"dailyEndpoint,omitempty"`
-	ProdEndpoint  string `json:"prodEndpoint,omitempty"`
+	AccessToken  string `json:"accessToken,omitempty"`
+	RefreshToken string `json:"refreshToken,omitempty"`
+	// OAuth client credentials are saved with the refresh token that uses them.
+	OAuthClientID     string `json:"oauthClientId,omitempty"`
+	OAuthClientSecret string `json:"oauthClientSecret,omitempty"`
+	ProjectID         string `json:"projectId,omitempty"`
+	DailyEndpoint     string `json:"dailyEndpoint,omitempty"`
+	ProdEndpoint      string `json:"prodEndpoint,omitempty"`
 	// QuotaPollIntervalSeconds is the positive interval between quota polls in seconds.
 	QuotaPollIntervalSeconds int `json:"quotaPollIntervalSeconds,omitempty"`
 	// QuotaHistoryPath is the JSONL file used to persist quota observations.
@@ -82,6 +85,14 @@ func Load() (Config, string, error) {
 	}
 	envString("ANTIGRAVITY_ACCESS_TOKEN", &cfg.AccessToken)
 	envString("ANTIGRAVITY_REFRESH_TOKEN", &cfg.RefreshToken)
+	// Load OAuth sources without requiring them for explicit access-token use.
+	// Login and Refresh validate the selected pair when OAuth is actually needed.
+	if id, secret, provided := oauthEnvironmentPair(); provided {
+		cfg.OAuthClientID, cfg.OAuthClientSecret = id, secret
+	} else {
+		cfg.OAuthClientID = strings.TrimSpace(cfg.OAuthClientID)
+		cfg.OAuthClientSecret = strings.TrimSpace(cfg.OAuthClientSecret)
+	}
 	envString("ANTIGRAVITY_PROJECT_ID", &cfg.ProjectID)
 	envString("ANTIGRAVITY_DAILY_ENDPOINT", &cfg.DailyEndpoint)
 	envString("ANTIGRAVITY_PROD_ENDPOINT", &cfg.ProdEndpoint)
@@ -115,6 +126,30 @@ func Load() (Config, string, error) {
 		return Config{}, "", fmt.Errorf("quotaHistoryPath must not be empty")
 	}
 	return cfg, path, nil
+}
+
+// OAuthCredentials resolves a whole environment pair before the saved pair.
+// An absent pair is allowed for login discovery; a partial pair is never mixed.
+func (cfg Config) OAuthCredentials() (string, string, error) {
+	id, secret, provided := oauthEnvironmentPair()
+	if provided {
+		if id == "" || secret == "" {
+			return "", "", fmt.Errorf("ANTIGRAVITY_OAUTH_CLIENT_ID and ANTIGRAVITY_OAUTH_CLIENT_SECRET must be provided together")
+		}
+		return id, secret, nil
+	}
+	id, secret = strings.TrimSpace(cfg.OAuthClientID), strings.TrimSpace(cfg.OAuthClientSecret)
+	if (id == "") != (secret == "") {
+		return "", "", fmt.Errorf("oauthClientId and oauthClientSecret must be provided together; run antigravity-proxy login or configure a complete environment pair")
+	}
+	return id, secret, nil
+}
+
+func oauthEnvironmentPair() (id, secret string, provided bool) {
+	id, idSet := os.LookupEnv("ANTIGRAVITY_OAUTH_CLIENT_ID")
+	secret, secretSet := os.LookupEnv("ANTIGRAVITY_OAUTH_CLIENT_SECRET")
+	id, secret = strings.TrimSpace(id), strings.TrimSpace(secret)
+	return id, secret, idSet != secretSet || id != "" || secret != ""
 }
 
 func envString(name string, dst *string) {

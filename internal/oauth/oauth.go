@@ -1,5 +1,5 @@
-// Package oauth handles Google authorization and token exchange using
-// runtime-provided OAuth client credentials.
+// Package oauth handles Google authorization and token exchange using configured
+// or safely extracted official CLI OAuth client credentials.
 package oauth
 
 import (
@@ -28,13 +28,15 @@ const (
 	oauthTokenURL = "https://oauth2.googleapis.com/token"
 )
 
-func oauthClientCredentials() (string, string, error) {
-	clientID := strings.TrimSpace(os.Getenv("ANTIGRAVITY_OAUTH_CLIENT_ID"))
-	clientSecret := strings.TrimSpace(os.Getenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET"))
-	if clientID == "" || clientSecret == "" {
-		return "", "", errors.New("ANTIGRAVITY_OAUTH_CLIENT_ID and ANTIGRAVITY_OAUTH_CLIENT_SECRET must be set")
+func oauthClientCredentials(cfg config.Config) (string, string, error) {
+	id, secret, err := cfg.OAuthCredentials()
+	if err != nil {
+		return "", "", err
 	}
-	return clientID, clientSecret, nil
+	if id == "" {
+		return "", "", errors.New("no OAuth client credentials saved; run antigravity-proxy login or configure a complete environment pair")
+	}
+	return id, secret, nil
 }
 
 var oauthScopes = []string{
@@ -81,11 +83,17 @@ func listenOAuthCallbackPort() (net.Listener, int, error) {
 
 // Login authorizes Google credentials through a loopback callback using PKCE
 // and state validation, then saves them to path while preserving other cfg settings.
-// Client credentials come from ANTIGRAVITY_OAUTH_CLIENT_ID and
-// ANTIGRAVITY_OAUTH_CLIENT_SECRET. It prefers saving a refresh token; if none
-// is returned, it saves the expiring access token instead.
+// A configured client pair takes precedence over credentials extracted from
+// installed agy or a checksum-verified official download. The exact pair is
+// saved with the resulting tokens; no CLI code or installer is executed.
 func Login(cfg config.Config, path string) error {
-	clientID, clientSecret, err := oauthClientCredentials()
+	return login(cfg, path, os.Stdout)
+}
+
+func login(cfg config.Config, path string, output io.Writer) error {
+	discoveryCtx, cancelDiscovery := context.WithTimeout(context.Background(), 3*time.Minute)
+	clientID, clientSecret, err := newCredentialDiscovery().resolve(discoveryCtx, cfg)
+	cancelDiscovery()
 	if err != nil {
 		return err
 	}
@@ -120,7 +128,7 @@ func Login(cfg config.Config, path string) error {
 		"code_challenge_method": {"S256"},
 		"state":                 {state},
 	}
-	fmt.Printf("Open this URL to authorize Antigravity Proxy:\n\n%s?%s\n\nWaiting for the local callback on port %d...\n", oauthAuthURL, query.Encode(), callbackPort)
+	fmt.Fprintf(output, "Open this URL to authorize Antigravity Proxy:\n\n%s?%s\n\nWaiting for the local callback on port %d...\n", oauthAuthURL, query.Encode(), callbackPort)
 
 	type callback struct {
 		code string
@@ -183,20 +191,27 @@ func Login(cfg config.Config, path string) error {
 	if err != nil {
 		return err
 	}
+	if err := saveLoginTokens(cfg, path, tokens, clientID, clientSecret); err != nil {
+		return err
+	}
+	if tokens.RefreshToken == "" {
+		fmt.Fprintln(os.Stderr, "Warning: Google did not return a refresh token; the saved access token expires.")
+	}
+	fmt.Fprintf(output, "Authorization saved to %s\n", path)
+	return nil
+}
+
+func saveLoginTokens(cfg config.Config, path string, tokens Tokens, clientID, clientSecret string) error {
 	if tokens.AccessToken == "" {
 		return errors.New("Google returned no access token")
 	}
+	cfg.OAuthClientID, cfg.OAuthClientSecret = clientID, clientSecret
 	cfg.AccessToken = ""
 	cfg.RefreshToken = tokens.RefreshToken
 	if cfg.RefreshToken == "" {
 		cfg.AccessToken = tokens.AccessToken
-		fmt.Fprintln(os.Stderr, "Warning: Google did not return a refresh token; the saved access token expires.")
 	}
-	if err := config.Save(path, cfg); err != nil {
-		return err
-	}
-	fmt.Printf("Authorization saved to %s\n", path)
-	return nil
+	return config.Save(path, cfg)
 }
 
 func exchangeOAuthCode(ctx context.Context, code, verifier, redirectURI, clientID, clientSecret string) (Tokens, error) {
@@ -229,17 +244,17 @@ func exchangeOAuthCode(ctx context.Context, code, verifier, redirectURI, clientI
 	return tokens, nil
 }
 
-// Refresh exchanges refreshToken using the runtime OAuth client credentials.
-// The request is bound to ctx; returned tokens are not saved to configuration.
-func Refresh(ctx context.Context, refreshToken string) (Tokens, error) {
-	clientID, clientSecret, err := oauthClientCredentials()
+// Refresh exchanges cfg.RefreshToken using only its saved or environment client
+// pair. It never discovers, downloads, or executes a CLI, and does not save tokens.
+func Refresh(ctx context.Context, cfg config.Config) (Tokens, error) {
+	clientID, clientSecret, err := oauthClientCredentials(cfg)
 	if err != nil {
 		return Tokens{}, err
 	}
 	form := url.Values{
 		"client_id":     {clientID},
 		"client_secret": {clientSecret},
-		"refresh_token": {refreshToken},
+		"refresh_token": {cfg.RefreshToken},
 		"grant_type":    {"refresh_token"},
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, oauthTokenURL, strings.NewReader(form.Encode()))
