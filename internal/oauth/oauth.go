@@ -83,19 +83,22 @@ func listenOAuthCallbackPort() (net.Listener, int, error) {
 
 // Login authorizes Google credentials through a loopback callback using PKCE
 // and state validation, then saves them to path while preserving other disk settings.
-// A configured client pair takes precedence over credentials extracted from
-// installed agy or a checksum-verified official download. The exact pair is
-// saved with the resulting tokens; no CLI code or installer is executed.
+// An explicit environment pair overrides consumer credentials extracted from
+// installed agy or a checksum-verified official download. Saved pairs are not
+// reused for login. The selected pair is saved only after successful authorization.
 func Login(cfg config.Config, path string) error {
 	return login(cfg, path, os.Stdout)
 }
 
 func login(cfg config.Config, path string, output io.Writer) error {
 	discoveryCtx, cancelDiscovery := context.WithTimeout(context.Background(), 3*time.Minute)
-	clientID, clientSecret, err := newCredentialDiscovery().resolve(discoveryCtx, cfg)
+	clientID, clientSecret, err := newCredentialDiscovery().resolve(discoveryCtx)
 	cancelDiscovery()
 	if err != nil {
 		return err
+	}
+	if cfg.OAuthClientID != "" && cfg.OAuthClientID != clientID {
+		fmt.Fprintln(output, "Authorizing with the consumer OAuth client; existing credentials remain unchanged until login succeeds.")
 	}
 	listener, callbackPort, err := listenOAuthCallbackPort()
 	if err != nil {

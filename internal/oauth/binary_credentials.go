@@ -55,24 +55,25 @@ func extractBinaryCredentials(data []byte) (string, string, error) {
 		functions := nativeFunctions(data[offset:], image.text.address)
 		for _, function := range functions {
 			// Only the native CLI OAuth selector is decoded.
-			code, ok := image.rangeAt(function.Entry, function.End-function.Entry)
-			if !ok {
-				continue
+			if function.Entry < image.text.address || function.End < function.Entry || function.End-image.text.address > uint64(len(image.text.data)) {
+				return "", "", errors.New("agy consumer OAuth selector has invalid native text bounds")
 			}
+			code := image.text.data[function.Entry-image.text.address : function.End-image.text.address]
 			var id, secret string
 			switch image.arch {
 			case "amd64":
-				id, secret = image.amd64CloudCodePair(code, function.Entry)
+				id, secret = image.amd64ConsumerPair(code, function.Entry)
 			case "arm64":
-				id, secret = image.arm64CloudCodePair(code, function.Entry)
+				id, secret = image.arm64ConsumerPair(code, function.Entry)
 			}
-			if id != "" && secret != "" {
-				pairs[id+"\x00"+secret] = [2]string{id, secret}
+			if id == "" || secret == "" {
+				return "", "", errors.New("cannot resolve agy consumer OAuth selector safely; set ANTIGRAVITY_OAUTH_CLIENT_ID and ANTIGRAVITY_OAUTH_CLIENT_SECRET explicitly")
 			}
+			pairs[id+"\x00"+secret] = [2]string{id, secret}
 		}
 	}
 	if len(pairs) != 1 {
-		return "", "", errors.New("cannot unambiguously resolve agy Cloud Code OAuth credentials; set ANTIGRAVITY_OAUTH_CLIENT_ID and ANTIGRAVITY_OAUTH_CLIENT_SECRET explicitly")
+		return "", "", errors.New("cannot unambiguously resolve agy consumer OAuth credentials; set ANTIGRAVITY_OAUTH_CLIENT_ID and ANTIGRAVITY_OAUTH_CLIENT_SECRET explicitly")
 	}
 	for _, pair := range pairs {
 		return pair[0], pair[1], nil
@@ -201,19 +202,6 @@ func readNativeImage(data []byte) (image nativeImage, err error) {
 	return image, nil
 }
 
-func (image nativeImage) rangeAt(address, size uint64) ([]byte, bool) {
-	for _, section := range image.sections {
-		if address < section.address {
-			continue
-		}
-		offset := address - section.address
-		if offset <= uint64(len(section.data)) && size <= uint64(len(section.data))-offset {
-			return section.data[offset : offset+size], true
-		}
-	}
-	return nil, false
-}
-
 func (image nativeImage) literalAt(address uint64, pattern *regexp.Regexp) string {
 	for _, section := range image.sections {
 		if address < section.address || address-section.address >= uint64(len(section.data)) {
@@ -231,46 +219,119 @@ func (image nativeImage) literalAt(address uint64, pattern *regexp.Regexp) strin
 	return ""
 }
 
-// The CLI's getOauthParams distinguishes GCP (Cloud Code) from consumer auth.
-// Read only the GCP branch: selecting the first literal in a string pool is unsafe.
-func (image nativeImage) amd64CloudCodePair(code []byte, base uint64) (string, string) {
-	for i := 0; i+16 < len(code); i++ {
-		// CMP word ptr [reg], 'gc', JNE; CMP byte ptr [reg+2], 'p', JNE.
-		if code[i] != 0x66 || code[i+1] != 0x81 || code[i+2]&0xf8 != 0x38 || code[i+3] != 'g' || code[i+4] != 'c' || code[i+5] != 0x75 || code[i+7] != 0x80 || code[i+8]&0xf8 != 0x78 || code[i+9] != 2 || code[i+10] != 'p' || code[i+11] != 0x75 {
-			continue
-		}
-		end := i + 13 + int(int8(code[i+12]))
-		if end <= i+13 || end > len(code) {
-			continue
-		}
-		return image.amd64ReferencedPair(code[i+13:end], base+uint64(i+13))
-	}
-	return "", ""
-}
-
-func (image nativeImage) amd64ReferencedPair(code []byte, base uint64) (string, string) {
+// Follow the native string switch, including the literal consumer comparison.
+// Decode the selected instructions to the Go return, never string-pool order.
+func (image nativeImage) amd64ConsumerPair(code []byte, base uint64) (string, string) {
 	var id, secret string
-	for i := 0; i+7 <= len(code); i++ {
-		if (code[i] == 0xeb || code[i] == 0xe9 || code[i] == 0xc3) && id != "" && secret != "" {
-			return id, secret // GCP exits before the adjacent consumer branch.
-		}
-		if (code[i] != 0x48 && code[i] != 0x4c) || code[i+1] != 0x8d || code[i+2]&0xc7 != 0x05 {
+	for i := 0; i+19 <= len(code); i++ {
+		if code[i] != 0x48 || code[i+1] != 0x83 || code[i+2]&0xf8 != 0xf8 || code[i+3] != 3 || code[i+4] != 0x75 ||
+			code[i+6] != 0x66 || code[i+7] != 0x81 || code[i+8]&0xf8 != 0x38 || code[i+9] != 'g' || code[i+10] != 'c' || code[i+11] != 0x75 ||
+			code[i+13] != 0x80 || code[i+14]&0xf8 != 0x78 || code[i+15] != 2 || code[i+16] != 'p' || code[i+17] != 0x75 {
 			continue
 		}
-		address := uint64(int64(base+uint64(i)+7) + int64(int32(binary.LittleEndian.Uint32(code[i+3:i+7]))))
-		if value := image.literalAt(address, binaryClientID); value != "" {
-			if id != "" && id != value {
-				return "", ""
-			}
-			id = value
+		pointer, length := code[i+8]&7, code[i+2]&7
+		consumer := i + 6 + int(int8(code[i+5]))
+		failure := i + 13 + int(int8(code[i+12]))
+		if pointer == 4 || pointer == 5 || pointer == length || code[i+14]&7 != pointer ||
+			failure != i+19+int(int8(code[i+18])) || consumer <= i+19 || consumer+21 > failure || failure >= len(code) {
+			return "", ""
 		}
-		if value := image.literalAt(address, binaryClientSecret); value != "" {
-			if secret != "" && secret != value {
-				return "", ""
-			}
-			secret = value
+		guard := code[consumer : consumer+21]
+		if guard[0] != 0x48 || guard[1] != 0x83 || guard[2] != 0xf8|length || guard[3] != 8 || guard[4] != 0x75 ||
+			consumer+6+int(int8(guard[5])) != failure || guard[6] != 0x48 || guard[7]&0xf8 != 0xb8 ||
+			binary.LittleEndian.Uint64(guard[8:16]) != 0x72656d75736e6f63 || guard[16] != 0x48 || guard[17] != 0x39 ||
+			guard[18] != (guard[7]&7)<<3|pointer || guard[19] != 0x75 || consumer+21+int(int8(guard[20])) != failure ||
+			guard[7]&7 == pointer || guard[7]&7 == length {
+			return "", ""
 		}
-		i += 6 // Do not interpret a LEA displacement as another instruction.
+		candidateID, candidateSecret := image.amd64ReturnedPair(code, base, consumer+21, failure)
+		if candidateID == "" || candidateSecret == "" || (id != "" && (id != candidateID || secret != candidateSecret)) {
+			return "", ""
+		}
+		id, secret = candidateID, candidateSecret
 	}
 	return id, secret
+}
+
+func (image nativeImage) amd64ReturnedPair(code []byte, base uint64, start, failure int) (string, string) {
+	var registers [16]uint64
+	var known [16]bool
+	var referencedID, referencedSecret string
+	for pc := start; pc < failure; {
+		remaining := code[pc:failure]
+		if remaining[0] == 0xc3 {
+			if !known[0] || !known[1] || !known[3] || !known[7] {
+				return "", ""
+			}
+			id := image.literalAt(registers[0], binaryClientID)
+			secret := image.literalAt(registers[1], binaryClientSecret)
+			if id == "" || secret == "" || registers[3] != uint64(len(id)) || registers[7] != uint64(len(secret)) {
+				return "", ""
+			}
+			return id, secret
+		}
+		if remaining[0] == 0x90 || remaining[0] == 0x5d { // NOP; POP RBP epilogue.
+			if remaining[0] == 0x5d {
+				known[5] = false
+			}
+			pc++
+			continue
+		}
+		rex, offset := byte(0), 0
+		if remaining[0]&0xf0 == 0x40 {
+			rex, offset = remaining[0], 1
+		}
+		if len(remaining) <= offset {
+			return "", ""
+		}
+		op := remaining[offset]
+		if op&0xf8 == 0xb8 && rex&8 == 0 && len(remaining) >= offset+5 {
+			rd := int(op&7) + int(rex&1)*8
+			registers[rd], known[rd] = uint64(binary.LittleEndian.Uint32(remaining[offset+1:offset+5])), true
+			pc += offset + 5
+			continue
+		}
+		if len(remaining) < offset+2 {
+			return "", ""
+		}
+		modrm := remaining[offset+1]
+		rd, rm := int((modrm>>3)&7)+int((rex>>2)&1)*8, int(modrm&7)+int(rex&1)*8
+		switch {
+		case op == 0x8d && rex&8 != 0 && rex&3 == 0 && modrm&0xc7 == 5 && len(remaining) >= offset+6:
+			address := uint64(int64(base+uint64(pc+offset+6)) + int64(int32(binary.LittleEndian.Uint32(remaining[offset+2:offset+6]))))
+			registers[rd], known[rd] = address, true
+			if value := image.literalAt(address, binaryClientID); value != "" {
+				if referencedID != "" && referencedID != value {
+					return "", ""
+				}
+				referencedID = value
+			}
+			if value := image.literalAt(address, binaryClientSecret); value != "" {
+				if referencedSecret != "" && referencedSecret != value {
+					return "", ""
+				}
+				referencedSecret = value
+			}
+			pc += offset + 6
+		case (op == 0x89 || op == 0x31) && modrm&0xc0 == 0xc0:
+			if op == 0x31 {
+				if rd != rm {
+					return "", ""
+				}
+				registers[rm], known[rm] = 0, true
+			} else {
+				registers[rm], known[rm] = registers[rd], known[rd]
+				if rex&8 == 0 {
+					registers[rm] &= 0xffffffff
+				}
+			}
+			pc += offset + 2
+		case rex == 0x48 && op == 0x83 && modrm == 0xc4 && len(remaining) >= 4: // ADD RSP,#imm8.
+			known[4] = false
+			pc += 4
+		default:
+			return "", "" // Calls, branches and unknown instructions fail closed.
+		}
+	}
+	return "", ""
 }

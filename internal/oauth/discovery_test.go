@@ -16,8 +16,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-
-	"antigravity-proxy/internal/config"
 )
 
 func isolatedDiscoveryHome(t *testing.T) string {
@@ -107,17 +105,19 @@ func discoveryTestServer(t *testing.T, payload []byte, archive bool, alterManife
 	return d, calls
 }
 
-func TestDiscoveryConfiguredPairDoesNotReadOrDownloadCLI(t *testing.T) {
+func TestDiscoveryExplicitEnvironmentPairOverridesNativeConsumer(t *testing.T) {
 	home := isolatedDiscoveryHome(t)
 	writeTestCLI(t, filepath.Join(home, "path", "agy"), []byte("invalid native binary"))
 	id, secret := syntheticPair(t)
-	d, calls := discoveryTestServer(t, nil, false, nil)
-	gotID, gotSecret, err := d.resolve(context.Background(), config.Config{OAuthClientID: id, OAuthClientSecret: secret})
-	if err != nil || gotID != id || gotSecret != secret || int(calls.Load()) != 0 {
-		t.Fatal("configured credentials touched local CLI or network")
-	}
 	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_ID", id)
-	if _, _, err := d.resolve(context.Background(), config.Config{OAuthClientID: id, OAuthClientSecret: secret}); err == nil || int(calls.Load()) != 0 {
+	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET", secret)
+	d, calls := discoveryTestServer(t, nil, false, nil)
+	gotID, gotSecret, err := d.resolve(context.Background())
+	if err != nil || gotID != id || gotSecret != secret || int(calls.Load()) != 0 {
+		t.Fatal("explicit environment credentials touched local CLI or network")
+	}
+	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET", "")
+	if _, _, err := d.resolve(context.Background()); err == nil || int(calls.Load()) != 0 {
 		t.Fatal("partial environment pair did not stop discovery")
 	}
 }
@@ -128,7 +128,7 @@ func TestDiscoveryFindsNativeCLIOnPATHBeforeHome(t *testing.T) {
 	writeTestCLI(t, filepath.Join(home, "path", "agy"), data)
 	writeTestCLI(t, filepath.Join(home, ".local", "bin", "agy"), []byte("invalid native binary"))
 	d, calls := discoveryTestServer(t, nil, false, nil)
-	gotID, gotSecret, err := d.resolve(context.Background(), config.Config{})
+	gotID, gotSecret, err := d.resolve(context.Background())
 	if err != nil || gotID != id || gotSecret != secret || int(calls.Load()) != 0 {
 		t.Fatal("PATH executable did not supply its native credential pair before HOME")
 	}
@@ -139,7 +139,7 @@ func TestDiscoveryFindsNativeCLIInHomeWithoutPATH(t *testing.T) {
 	data, id, secret := syntheticNativeCLI(t)
 	writeTestCLI(t, filepath.Join(home, ".local", "bin", "agy"), data)
 	d, calls := discoveryTestServer(t, nil, false, nil)
-	gotID, gotSecret, err := d.resolve(context.Background(), config.Config{})
+	gotID, gotSecret, err := d.resolve(context.Background())
 	if err != nil || gotID != id || gotSecret != secret || int(calls.Load()) != 0 {
 		t.Fatal("HOME CLI did not supply its native credential pair without network")
 	}
@@ -156,7 +156,7 @@ func TestDiscoveryInvalidLocalCLIStopsWithoutDownloadOrExecution(t *testing.T) {
 			}
 			writeTestCLI(t, path, []byte("#!/bin/sh\ntouch '"+marker+"'\n"))
 			d, calls := discoveryTestServer(t, nil, false, nil)
-			if _, _, err := d.resolve(context.Background(), config.Config{}); err == nil || !strings.Contains(err.Error(), "installed agy") || int(calls.Load()) != 0 {
+			if _, _, err := d.resolve(context.Background()); err == nil || !strings.Contains(err.Error(), "installed agy") || int(calls.Load()) != 0 {
 				t.Fatal("invalid installed CLI did not stop discovery before download")
 			}
 			if _, err := os.Stat(marker); !os.IsNotExist(err) {
@@ -172,7 +172,7 @@ func TestDiscoveryNonRegularHomeCLIStops(t *testing.T) {
 		t.Fatal(err)
 	}
 	d, calls := discoveryTestServer(t, nil, false, nil)
-	if _, _, err := d.resolve(context.Background(), config.Config{}); err == nil || int(calls.Load()) != 0 {
+	if _, _, err := d.resolve(context.Background()); err == nil || int(calls.Load()) != 0 {
 		t.Fatal("nonregular home CLI did not stop discovery")
 	}
 }
@@ -189,7 +189,7 @@ func TestDiscoveryDownloadsVerifiedNativeDirectAndArchivePayloads(t *testing.T) 
 			d, calls := discoveryTestServer(t, payload, archive, nil)
 			temp := t.TempDir()
 			t.Setenv("TMPDIR", temp)
-			gotID, gotSecret, err := d.resolve(context.Background(), config.Config{})
+			gotID, gotSecret, err := d.resolve(context.Background())
 			if err != nil || gotID != id || gotSecret != secret || int(calls.Load()) != 2 {
 				t.Fatal("verified official download did not resolve the native pair")
 			}
@@ -226,7 +226,7 @@ func TestDiscoveryRejectsManifestAndPayloadFailures(t *testing.T) {
 			d, calls := discoveryTestServer(t, test.payload, test.archive, test.alter)
 			temp := t.TempDir()
 			t.Setenv("TMPDIR", temp)
-			if _, _, err := d.resolve(context.Background(), config.Config{}); err == nil || !strings.Contains(err.Error(), test.want) || int(calls.Load()) != test.calls {
+			if _, _, err := d.resolve(context.Background()); err == nil || !strings.Contains(err.Error(), test.want) || int(calls.Load()) != test.calls {
 				t.Fatal("download did not fail at the expected safe stage")
 			}
 			entries, err := os.ReadDir(temp)
@@ -247,7 +247,7 @@ func TestDiscoveryRejectsUnsafeAndMissingArchiveMembers(t *testing.T) {
 		isolatedDiscoveryHome(t)
 		payload := cliTestArchive(t, members...)
 		d, calls := discoveryTestServer(t, payload, true, nil)
-		if _, _, err := d.resolve(context.Background(), config.Config{}); err == nil || !strings.Contains(err.Error(), "antigravity binary") || int(calls.Load()) != 2 {
+		if _, _, err := d.resolve(context.Background()); err == nil || !strings.Contains(err.Error(), "antigravity binary") || int(calls.Load()) != 2 {
 			t.Fatal("unsafe or missing archive member was accepted")
 		}
 	}
@@ -276,7 +276,7 @@ func TestDiscoveryPlatformMappingAndUnsupportedPlatforms(t *testing.T) {
 	isolatedDiscoveryHome(t)
 	d, calls := discoveryTestServer(t, nil, false, nil)
 	d.goos = "unsupported"
-	if _, _, err := d.resolve(context.Background(), config.Config{}); err == nil || int(calls.Load()) != 0 {
+	if _, _, err := d.resolve(context.Background()); err == nil || int(calls.Load()) != 0 {
 		t.Fatal("unsupported platform contacted download server")
 	}
 }
@@ -299,7 +299,7 @@ func TestDiscoveryNetworkAndRedirectErrors(t *testing.T) {
 			d := newCredentialDiscovery()
 			d.manifestBase, d.goos, d.goarch = server.URL, "linux", "amd64"
 			d.client.Transport = server.Client().Transport
-			if _, _, err := d.resolve(context.Background(), config.Config{}); err == nil {
+			if _, _, err := d.resolve(context.Background()); err == nil {
 				t.Fatal("manifest failure or insecure redirect was accepted")
 			}
 		})
@@ -308,7 +308,7 @@ func TestDiscoveryNetworkAndRedirectErrors(t *testing.T) {
 	d := newCredentialDiscovery()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := d.resolve(ctx, config.Config{}); err == nil {
+	if _, _, err := d.resolve(ctx); err == nil {
 		t.Fatal("cancelled download was accepted")
 	}
 }
@@ -319,7 +319,7 @@ func TestDiscoveryLocalNativeWithoutCredentialsStops(t *testing.T) {
 	data = bytes.ReplaceAll(data, []byte(id), bytes.Repeat([]byte{'x'}, len(id)))
 	writeTestCLI(t, filepath.Join(home, "path", "agy"), data)
 	d, calls := discoveryTestServer(t, nil, false, nil)
-	if _, _, err := d.resolve(context.Background(), config.Config{}); err == nil || int(calls.Load()) != 0 {
+	if _, _, err := d.resolve(context.Background()); err == nil || int(calls.Load()) != 0 {
 		t.Fatal("native CLI missing credential references did not stop discovery")
 	}
 }
@@ -334,7 +334,7 @@ func TestDiscoveryBrokenHomeSymlinkStops(t *testing.T) {
 		t.Fatal(err)
 	}
 	d, calls := discoveryTestServer(t, nil, false, nil)
-	if _, _, err := d.resolve(context.Background(), config.Config{}); err == nil || int(calls.Load()) != 0 {
+	if _, _, err := d.resolve(context.Background()); err == nil || int(calls.Load()) != 0 {
 		t.Fatal("broken installed CLI symlink triggered a download")
 	}
 }
@@ -343,8 +343,8 @@ func TestDiscoveryRejectsCorruptGzipTrailer(t *testing.T) {
 	isolatedDiscoveryHome(t)
 	payload := cliTestArchive(t, archiveTestMember{name: "antigravity", kind: tar.TypeReg, data: []byte("synthetic invalid native")})
 	payload[len(payload)-1] ^= 1
-	d, calls := discoveryTestServer(t, payload, true, nil)
-	if _, _, err := d.resolve(context.Background(), config.Config{}); err == nil || !strings.Contains(err.Error(), "archive is corrupt") || int(calls.Load()) != 2 {
+	d, _ := discoveryTestServer(t, payload, true, nil)
+	if _, _, err := d.resolve(context.Background()); err == nil || !strings.Contains(err.Error(), "archive is corrupt") {
 		t.Fatal("verified payload with corrupt gzip trailer was not rejected")
 	}
 }
@@ -365,7 +365,7 @@ func TestDiscoveryOversizedLocalCLIStopsBeforeRead(t *testing.T) {
 	}
 	file.Close()
 	d, calls := discoveryTestServer(t, nil, false, nil)
-	if _, _, err := d.resolve(context.Background(), config.Config{}); err == nil || int(calls.Load()) != 0 {
+	if _, _, err := d.resolve(context.Background()); err == nil || int(calls.Load()) != 0 {
 		t.Fatal("oversized installed CLI triggered extraction or download")
 	}
 }
@@ -379,7 +379,7 @@ func TestDiscoveryRejectsOversizedManifest(t *testing.T) {
 	d := newCredentialDiscovery()
 	d.manifestBase, d.goos, d.goarch = server.URL, "linux", "amd64"
 	d.client.Transport = server.Client().Transport
-	if _, _, err := d.resolve(context.Background(), config.Config{}); err == nil || !strings.Contains(err.Error(), "too large") {
+	if _, _, err := d.resolve(context.Background()); err == nil || !strings.Contains(err.Error(), "too large") {
 		t.Fatal("unbounded manifest was accepted")
 	}
 }
@@ -389,7 +389,7 @@ func TestDiscoveryAmbiguousLocalNativeCLIStopsWithoutDownload(t *testing.T) {
 	data := syntheticAmbiguousNativeCLI(t)
 	writeTestCLI(t, filepath.Join(home, "path", "agy"), data)
 	d, calls := discoveryTestServer(t, nil, false, nil)
-	if _, _, err := d.resolve(context.Background(), config.Config{}); err == nil || int(calls.Load()) != 0 {
+	if _, _, err := d.resolve(context.Background()); err == nil || int(calls.Load()) != 0 {
 		t.Fatal("ambiguous native credential pairs triggered fallback or download")
 	}
 }

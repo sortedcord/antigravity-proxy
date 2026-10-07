@@ -63,8 +63,10 @@ func requireHTTPS(u *url.URL) error {
 	return nil
 }
 
-func (d credentialDiscovery) resolve(ctx context.Context, cfg config.Config) (string, string, error) {
-	id, secret, err := cfg.OAuthCredentials()
+// Login resolves a fresh consumer client; saved pairs belong to existing tokens
+// and must not keep a previous GCP login pinned to the incompatible client.
+func (d credentialDiscovery) resolve(ctx context.Context) (string, string, error) {
+	id, secret, err := (config.Config{}).OAuthCredentials()
 	if err != nil || id != "" {
 		return id, secret, err
 	}

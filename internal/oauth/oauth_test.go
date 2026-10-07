@@ -196,19 +196,14 @@ func TestLoginCallbackPersistsPairForLaterRefresh(t *testing.T) {
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			failAuthorization := scenario.failAuthorization
-			clearOAuthEnvironment(t)
-			id, secret := syntheticPair(t)
-			cfg := config.Config{OAuthClientID: id, OAuthClientSecret: secret, ProjectID: t.Name()}
-			if !failAuthorization && !scenario.failToken {
-				home := isolatedDiscoveryHome(t)
-				data, nativeID, nativeSecret := syntheticNativeCLI(t)
-				id, secret = nativeID, nativeSecret
-				writeTestCLI(t, filepath.Join(home, "path", "agy"), data)
-				cfg.OAuthClientID, cfg.OAuthClientSecret = "", ""
-			}
+			home := isolatedDiscoveryHome(t)
+			oldID, oldSecret := syntheticPair(t)
+			cfg := config.Config{OAuthClientID: oldID, OAuthClientSecret: oldSecret, RefreshToken: t.Name() + "-old-refresh", ProjectID: t.Name()}
+			cliData, id, secret := syntheticNativeCLI(t)
+			writeTestCLI(t, filepath.Join(home, "path", "agy"), cliData)
 			path := filepath.Join(t.TempDir(), "config.json")
 			if !failAuthorization {
-				if err := config.Save(path, config.Config{ProjectID: cfg.ProjectID}); err != nil {
+				if err := config.Save(path, cfg); err != nil {
 					t.Fatal(err)
 				}
 			}
