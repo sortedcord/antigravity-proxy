@@ -187,7 +187,7 @@ For comprehensive technical specifications and reference guides, check out:
 - **[API Reference](docs/api.md)**: Full endpoint listing, streaming format, pagination, and video understanding.
 - **[Configuration Guide](docs/configuration.md)**: Config schema, environment variable reference, and security controls.
 - **[Deployment Guide](docs/deployment.md)**: Standalone Docker, Docker Compose, permissions, and network setup.
-- **[Architecture & Design](docs/architecture.md)**: Deep dive into OAuth extraction, Cloud Code translation, and storage engine mechanics.
+- **[Architecture & Design](docs/architecture.md)**: Deep dive into OAuth authentication, Cloud Code translation, and storage engine mechanics.
 
 ## Disclaimer
 

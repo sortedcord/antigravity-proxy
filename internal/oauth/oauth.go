@@ -83,16 +83,16 @@ func listenOAuthCallbackPort() (net.Listener, int, error) {
 
 // Login authorizes Google credentials through a loopback callback using PKCE
 // and state validation, then saves them to path while preserving other disk settings.
-// An explicit environment pair overrides consumer credentials extracted from
-// installed agy or a checksum-verified official download. Saved pairs are not
-// reused for login. The selected pair is saved only after successful authorization.
+// An explicit environment pair overrides the official consumer credentials.
+// Saved pairs are not reused for login. The selected pair is saved only after
+// successful authorization.
 func Login(cfg config.Config, path string) error {
 	return login(cfg, path, os.Stdout)
 }
 
 func login(cfg config.Config, path string, output io.Writer) error {
-	discoveryCtx, cancelDiscovery := context.WithTimeout(context.Background(), 3*time.Minute)
-	clientID, clientSecret, err := newCredentialDiscovery().resolve(discoveryCtx)
+	discoveryCtx, cancelDiscovery := context.WithTimeout(context.Background(), 30*time.Second)
+	clientID, clientSecret, err := resolveLoginCredentials(discoveryCtx)
 	cancelDiscovery()
 	if err != nil {
 		return err
@@ -241,7 +241,7 @@ func exchangeOAuthCode(ctx context.Context, code, verifier, redirectURI, clientI
 }
 
 // Refresh exchanges cfg.RefreshToken using only its saved or environment client
-// pair. It never discovers, downloads, or executes a CLI, and does not save tokens.
+// pair. It never saves tokens.
 func Refresh(ctx context.Context, cfg config.Config) (Tokens, error) {
 	clientID, clientSecret, err := oauthClientCredentials(cfg)
 	if err != nil {

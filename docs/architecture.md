@@ -42,18 +42,17 @@ Antigravity models run on Google's private Cloud Code infrastructure. When a cli
 
 ---
 
-## 2. Authentication & OAuth Discovery
+## 2. Authentication & Client Credentials
 
 Antigravity access requires authenticating against Google with the official consumer OAuth client identity.
 
 ### Consumer vs. GCP Client Branch
 
-Official Antigravity binaries contain two distinct OAuth client configurations:
+Google distinguishes between two OAuth client configurations:
 1. **Cloud Code / GCP Client**: Used for Google Cloud Platform integrations. Google rejects individual consumer Antigravity requests under this client (`GOOGLE_TOS_NOT_SUPPORTED_BY_CLIENT`).
 2. **Consumer Client**: Used for official Antigravity IDE and consumer subscriptions.
 
-The proxy's `internal/oauth` package disassembles native machine code from the official `agy` binary (both `amd64` and `arm64`) to extract the exact consumer OAuth client ID and secret without executing untrusted code or guessing string order in memory.
-
+The proxy's `internal/oauth` package uses the official consumer OAuth client credentials to authenticate with Google OAuth. Users can also override these via the `ANTIGRAVITY_OAUTH_CLIENT_ID` and `ANTIGRAVITY_OAUTH_CLIENT_SECRET` environment variables.
 ### Token Flow & Storage
 
 1. **Authorization**: `antigravity-proxy login` opens Google's OAuth consent screen with PKCE (`S256`).
@@ -94,7 +93,7 @@ cmd/antigravity-proxy/
   main.go                     # CLI entrypoint (serve, login) and signal management
 internal/
   config/                     # Configuration schema, validation, and file persistence
-  oauth/                      # OAuth discovery, native binary scanning, PKCE login flow
+  oauth/                      # OAuth client credentials, PKCE login flow, token refresh
   proxy/                      # Reverse proxy, Gemini HTTP handler, SSE streaming
   quota/                      # Quota fetcher and upstream response parsing
   status/                     # Background quota polling, durable storage, query engine

@@ -196,11 +196,12 @@ func TestLoginCallbackPersistsPairForLaterRefresh(t *testing.T) {
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			failAuthorization := scenario.failAuthorization
-			home := isolatedDiscoveryHome(t)
+			clearOAuthEnvironment(t)
 			oldID, oldSecret := syntheticPair(t)
 			cfg := config.Config{OAuthClientID: oldID, OAuthClientSecret: oldSecret, RefreshToken: t.Name() + "-old-refresh", ProjectID: t.Name()}
-			cliData, id, secret := syntheticNativeCLI(t)
-			writeTestCLI(t, filepath.Join(home, "path", "agy"), cliData)
+			id, secret := t.Name()+"-client-id", t.Name()+"-client-secret"
+			t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_ID", id)
+			t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET", secret)
 			path := filepath.Join(t.TempDir(), "config.json")
 			if !failAuthorization {
 				if err := config.Save(path, cfg); err != nil {
@@ -372,5 +373,47 @@ func TestLoginCallbackPersistsPairForLaterRefresh(t *testing.T) {
 				t.Fatal("later refresh could not use the saved pair")
 			}
 		})
+	}
+}
+
+func TestResolveLoginCredentialsDefault(t *testing.T) {
+	clearOAuthEnvironment(t)
+	id, secret, err := resolveLoginCredentials(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != consumerAppTag || secret != consumerTokenKey {
+		t.Fatalf("expected official credentials, got id=%q, secret=%q", id, secret)
+	}
+}
+
+func TestResolveLoginCredentialsEnvironmentOverride(t *testing.T) {
+	clearOAuthEnvironment(t)
+	envID, envSecret := "test-custom-id", "test-custom-secret"
+	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_ID", envID)
+	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET", envSecret)
+	id, secret, err := resolveLoginCredentials(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != envID || secret != envSecret {
+		t.Fatalf("expected environment credentials, got id=%q, secret=%q", id, secret)
+	}
+}
+
+func TestResolveLoginCredentialsContextCancelled(t *testing.T) {
+	clearOAuthEnvironment(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := resolveLoginCredentials(ctx); err == nil {
+		t.Fatal("expected error on cancelled context")
+	}
+}
+
+func TestResolveLoginCredentialsPartialEnvironment(t *testing.T) {
+	clearOAuthEnvironment(t)
+	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_ID", "only-id")
+	if _, _, err := resolveLoginCredentials(context.Background()); err == nil {
+		t.Fatal("expected error with partial environment pair")
 	}
 }
