@@ -11,6 +11,11 @@ This is deliberately **not a universal API translator**. There is no OpenAI or A
 
 The narrow scope is the point: fewer format conversions, fewer opportunities to lose model-specific features, and a clear job for the proxy to do well. Claude and other models available through Antigravity use the same interface.
 
+
+<p align="center">
+  <img src="docs/assets/illustrations/model-access.svg" alt="Comparison of model access: the Antigravity app has a hardcoded list of 7 models, while Antigravity Proxy discovers 11 or more from the account, including the latest Gemini models, Claude and GPT models, image generation, legacy models, and new releases without waiting for Google's UI mapping updates.">
+</p>
+
 Use a Gemini-compatible client directly. If your coding harness needs an OpenAI-compatible API, add a gateway such as [Bifrost](https://getbifrost.ai/) in front. Translation belongs in that optional layer, not in this proxy.
 
 ## Bring video to your Gemini workflows

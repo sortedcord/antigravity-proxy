@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Model access: Antigravity app vs Antigravity Proxy</title>
+<link rel="stylesheet" href="tokens.css">
+<style>
+  .table {
+    position: relative;
+    margin-top: var(--s8);
+  }
+
+  /* Highlighted "winner" column, drawn behind the rows. */
+  .highlight {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 208px;
+    background: var(--blue-container);
+    border-radius: var(--radius-card);
+  }
+
+  .highlight::before {
+    content: "";
+    position: absolute;
+    inset: 0 var(--s4) auto;
+    height: 4px;
+    border-radius: 0 0 var(--radius-pill) var(--radius-pill);
+    background: var(--signature);
+  }
+
+  .row {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1fr 208px 208px;
+    align-items: center;
+    min-height: 48px;
+    border-bottom: var(--stroke) solid var(--divider);
+  }
+
+  .row > :nth-child(n + 2) {
+    display: flex;
+    justify-content: center;
+  }
+
+  .row.head {
+    min-height: 104px;
+    align-items: end;
+    padding-bottom: var(--s4);
+    border-bottom-color: var(--outline);
+  }
+
+  .colhead {
+    flex-direction: column;
+    align-items: center;
+    gap: var(--s2);
+    text-align: center;
+  }
+
+  .colhead b {
+    font: var(--subtitle);
+    font-weight: 400;
+  }
+
+  .colhead.muted b { color: var(--ink-secondary); }
+  .colhead.primary b { color: var(--blue-ink); }
+
+  .group {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    min-height: 40px;
+    padding-top: var(--s4);
+    font: var(--label);
+    letter-spacing: 0.2px;
+    color: var(--ink-secondary);
+  }
+
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+  }
+
+  .model {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    font: var(--body);
+  }
+
+  .row.capability {
+    min-height: 88px;
+  }
+
+  .capability .model {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--s1);
+    padding: var(--s4) var(--s4) var(--s4) 0;
+  }
+
+  .capability .model b {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    font: var(--title);
+  }
+
+  .capability .model b .icon {
+    width: 32px;
+    height: 32px;
+    padding: var(--s1);
+    border-radius: var(--radius-chip);
+    flex-shrink: 0;
+  }
+
+  .capability .icon.blue { background: var(--blue-container); color: var(--blue-ink); }
+  .capability .icon.red { background: var(--red-container); color: var(--red-ink); }
+  .capability .icon.green { background: var(--green-container); color: var(--green-ink); }
+  .capability .icon.yellow { background: var(--yellow-container); color: var(--yellow-ink); }
+
+  .capability .model span {
+    font: var(--caption);
+    color: var(--ink-secondary);
+  }
+
+  .dash {
+    width: 16px;
+    height: 2px;
+    border-radius: var(--radius-pill);
+    background: var(--ink-disabled);
+  }
+
+  .row.total {
+    min-height: 112px;
+    border-bottom: 0;
+  }
+
+  .total .label {
+    font: var(--label);
+    color: var(--ink-secondary);
+  }
+
+  .stat {
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .stat b {
+    font: var(--stat);
+    font-weight: 400;
+    letter-spacing: -1px;
+  }
+
+  .stat span {
+    font: var(--caption);
+    color: var(--ink-secondary);
+  }
+
+  .stat.muted b { color: var(--ink-tertiary); }
+  .stat.primary b { color: var(--blue-ink); }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="check" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="12" fill="#34A853"/>
+      <path d="M7 12.5l3.2 3.2L17 9" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="flash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M13 2 3 14h8l-1 8 11-12h-8l1-8Z"/>
+    </symbol>
+    <symbol id="layers" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="m12 3 10 5-10 5L2 8l10-5Z"/>
+      <path d="m2 12 10 5 10-5M2 16l10 5 10-5"/>
+    </symbol>
+    <symbol id="image" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="3" width="18" height="18" rx="2"/>
+      <circle cx="8.5" cy="8.5" r="1.5"/>
+      <path d="m21 15-5-5L5 21"/>
+    </symbol>
+    <symbol id="history" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+      <path d="M3 3v5h5M12 7v5l4 2"/>
+    </symbol>
+  </defs>
+</svg>
+
+<main class="frame">
+  <div class="eyebrow">
+    <span class="stripe"><i></i><i></i><i></i><i></i></span>
+    Model access
+  </div>
+  <h1 class="display">Every model on your account,<br>not just the ones they show you.</h1>
+
+  <section class="table">
+    <div class="highlight"></div>
+
+    <div class="row head">
+      <div></div>
+      <div class="colhead muted"><b>Antigravity app</b><span class="chip neutral">Hardcoded list</span></div>
+      <div class="colhead primary"><b>Antigravity Proxy</b><span class="chip blue on-tint">Live discovery</span></div>
+    </div>
+
+    <div class="group"><span class="dot" style="background:var(--blue)"></span>Gemini</div>
+    <div class="row capability"><div class="model"><b><svg class="icon blue" aria-hidden="true"><use href="#flash"/></svg>Latest Gemini Models</b><span>Gemini 3.8 Flash, Gemini 3.7 Flash, Gemini 3.6 Flash</span></div><div><svg class="icon"><use href="#check"/></svg></div><div><svg class="icon"><use href="#check"/></svg></div></div>
+    <div class="row"><div class="model">Gemini 3.1 Pro</div><div><svg class="icon"><use href="#check"/></svg></div><div><svg class="icon"><use href="#check"/></svg></div></div>
+    <div class="row"><div class="model extra">Gemini 3.5 Flash Lite</div><div><span class="dash"></span></div><div><svg class="icon"><use href="#check"/></svg></div></div>
+
+    <div class="row capability"><div class="model"><b><svg class="icon red" aria-hidden="true"><use href="#layers"/></svg>Third Party Models</b><span>Claude Opus 4.6, Claude Sonnet 4.6, GPT OSS 120B</span></div><div><svg class="icon"><use href="#check"/></svg></div><div><svg class="icon"><use href="#check"/></svg></div></div>
+    <div class="row capability"><div class="model extra"><b><svg class="icon green" aria-hidden="true"><use href="#image"/></svg>Image Generation Models</b><span>Gemini 3.1 Flash Image</span></div><div><span class="dash"></span></div><div><svg class="icon"><use href="#check"/></svg></div></div>
+    <div class="row capability"><div class="model extra"><b><svg class="icon yellow" aria-hidden="true"><use href="#history"/></svg>Legacy Models</b><span>Gemini 3 Flash, Gemini 2.5 Pro</span></div><div><span class="dash"></span></div><div><svg class="icon"><use href="#check"/></svg></div></div>
+
+    <div class="group"><span class="dot" style="background:var(--green)"></span>New Releases</div>
+    <div class="row"><div class="model extra">New models, without waiting for Google’s UI mapping updates</div><div><span class="dash"></span></div><div><svg class="icon"><use href="#check"/></svg></div></div>
+
+    <div class="row total">
+      <div class="label">Models available</div>
+      <div class="stat muted"><b>7</b><span>fixed at release</span></div>
+      <div class="stat primary"><b>11+</b><span>whatever your account has</span></div>
+    </div>
+  </section>
+</main>
+<script src="page.js"></script>
+</body>
+</html>
