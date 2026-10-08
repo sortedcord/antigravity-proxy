@@ -65,6 +65,8 @@ type Collector struct {
 	polling    PollInfo
 	storeFault error
 
+	trigger chan struct{}
+
 	started    bool
 	closed     bool
 	cancel     context.CancelFunc
@@ -118,7 +120,7 @@ func Open(path string, interval time.Duration, maxSamples int, fetch FetchFunc) 
 	}
 	c := &Collector{
 		path: path, tempPrefix: historyTempPrefix(path), lock: lock, maxSamples: maxSamples, storage: defaultHistoryStorage(),
-		interval: interval, fetch: fetch, closeDone: make(chan struct{}),
+		interval: interval, fetch: fetch, closeDone: make(chan struct{}), trigger: make(chan struct{}, 1),
 		polling: PollInfo{IntervalSeconds: int64(interval / time.Second)},
 	}
 	fail := func(err error) (*Collector, error) {
@@ -194,10 +196,11 @@ func (c *Collector) run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			c.poll(ctx)
+		case <-c.trigger:
+			c.poll(ctx)
 		}
 	}
 }
-
 func (c *Collector) poll(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
@@ -325,6 +328,19 @@ func (c *Collector) Latest() (quota.Snapshot, bool, PollInfo) {
 		return quota.Snapshot{}, false, info
 	}
 	return cloneSnapshot(c.samples[len(c.samples)-1]), true, info
+}
+
+// TriggerPoll requests an immediate poll if the collector is started and not closed.
+func (c *Collector) TriggerPoll() {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.closed || !c.started {
+		return
+	}
+	select {
+	case c.trigger <- struct{}{}:
+	default:
+	}
 }
 
 // Close cancels and joins the polling worker before closing storage. It is

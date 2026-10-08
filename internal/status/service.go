@@ -2,12 +2,15 @@ package status
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +27,10 @@ type Service struct {
 	fetch           FetchFunc
 	mu              sync.RWMutex
 	collector       *Collector
+	started         bool
+	closed          bool
+	closeDone       chan struct{}
+	closeErr        error
 }
 
 // NewService configures status without starting work or opening history files.
@@ -31,13 +38,20 @@ func NewService(cfg config.Config, fetch FetchFunc) *Service {
 	return &Service{historyPath: cfg.QuotaHistoryPath, intervalSeconds: cfg.QuotaPollIntervalSeconds, maxSamples: cfg.QuotaHistoryMaxSamples, fetch: fetch}
 }
 
-// Start opens persistent quota history and starts account-scoped polling.
-// It is explicit so constructing a Service does not start background work or write files.
-func (s *Service) Start(ctx context.Context) error {
+// Prepare opens and validates persistent history and holds its exclusive lock.
+// It does not start a worker or fetch quota. Repeated preparation is harmless.
+func (s *Service) Prepare() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.prepareLocked()
+}
+
+func (s *Service) prepareLocked() error {
+	if s.closed {
+		return errors.New("quota status service is closed")
+	}
 	if s.collector != nil {
-		return errors.New("quota status polling is already started")
+		return nil
 	}
 	seconds := s.intervalSeconds
 	if seconds == 0 {
@@ -50,24 +64,60 @@ func (s *Service) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("open quota history: %w", err)
 	}
-	if err := collector.Start(ctx); err != nil {
-		_ = collector.Close()
-		return fmt.Errorf("start quota polling: %w", err)
-	}
 	s.collector = collector
 	return nil
 }
 
-// Close cancels polling, waits for the active fetch to finish, and closes
-// the history file. It is safe to call when polling has not been started.
-func (s *Service) Close() error {
+// Start begins polling prepared history, preparing it first if necessary.
+// A Service can start only once, including when its parent context is canceled.
+func (s *Service) Start(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.collector == nil {
-		return nil
+	if s.closed {
+		return errors.New("quota status service is closed")
 	}
-	err := s.collector.Close()
+	if s.started {
+		return errors.New("quota status polling is already started")
+	}
+	if ctx == nil {
+		return errors.New("quota polling context is nil")
+	}
+	if err := s.prepareLocked(); err != nil {
+		return err
+	}
+	if err := s.collector.Start(ctx); err != nil {
+		return fmt.Errorf("start quota polling: %w", err)
+	}
+	s.started = true
+	return nil
+}
+
+// Close cancels and joins polling and releases even prepared, unstarted history.
+// It is terminal, idempotent, and safe concurrently with reads and lifecycle calls.
+func (s *Service) Close() error {
+	s.mu.Lock()
+	if s.closed {
+		done := s.closeDone
+		s.mu.Unlock()
+		<-done
+		s.mu.RLock()
+		err := s.closeErr
+		s.mu.RUnlock()
+		return err
+	}
+	s.closed = true
+	s.closeDone = make(chan struct{})
+	collector := s.collector
+	s.mu.Unlock()
+	var err error
+	if collector != nil {
+		err = collector.Close()
+	}
+	s.mu.Lock()
 	s.collector = nil
+	s.closeErr = err
+	close(s.closeDone)
+	s.mu.Unlock()
 	return err
 }
 
@@ -75,6 +125,23 @@ func (s *Service) quotaCollector() *Collector {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.collector
+}
+
+// TriggerPoll requests an immediate poll if quota collection is active.
+func (s *Service) TriggerPoll() {
+	if c := s.quotaCollector(); c != nil {
+		c.TriggerPoll()
+	}
+}
+
+// AccountHistoryPath isolates every namespace in a stable, filesystem-safe path.
+// The unsuffixed legacy history is never selected, even for an empty namespace.
+func AccountHistoryPath(basePath, accountID string) string {
+	dir := filepath.Dir(basePath)
+	ext := filepath.Ext(basePath)
+	base := strings.TrimSuffix(filepath.Base(basePath), ext)
+	digest := sha256.Sum256([]byte(accountID))
+	return filepath.Join(dir, fmt.Sprintf("%s-%x%s", base, digest, ext))
 }
 
 // ServeHTTP serves limit and usage after the outer router authenticates requests.

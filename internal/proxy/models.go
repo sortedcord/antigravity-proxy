@@ -144,6 +144,10 @@ func parseGeminiModelPagination(r *http.Request) (int, string, error) {
 }
 
 func (p *Proxy) geminiModelCatalog(w http.ResponseWriter, r *http.Request) ([]geminiModel, bool) {
+	if !p.hasCredentials() {
+		writeGeminiError(w, http.StatusServiceUnavailable, "Google authentication unavailable")
+		return nil, false
+	}
 	token, err := p.accessToken(r.Context())
 	if err != nil {
 		writeGeminiError(w, http.StatusServiceUnavailable, "Google authentication unavailable")

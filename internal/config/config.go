@@ -41,9 +41,13 @@ type Config struct {
 	// OAuth client credentials are saved with the refresh token that uses them.
 	OAuthClientID     string `json:"oauthClientId,omitempty"`
 	OAuthClientSecret string `json:"oauthClientSecret,omitempty"`
-	ProjectID         string `json:"projectId,omitempty"`
-	DailyEndpoint     string `json:"dailyEndpoint,omitempty"`
-	ProdEndpoint      string `json:"prodEndpoint,omitempty"`
+	// Account identity belongs to the saved token set, never an environment override.
+	AccountID     string `json:"accountId,omitempty"`
+	AccountEmail  string `json:"accountEmail,omitempty"`
+	AccountName   string `json:"accountName,omitempty"`
+	ProjectID     string `json:"projectId,omitempty"`
+	DailyEndpoint string `json:"dailyEndpoint,omitempty"`
+	ProdEndpoint  string `json:"prodEndpoint,omitempty"`
 	// QuotaPollIntervalSeconds is the positive interval between quota polls in seconds.
 	QuotaPollIntervalSeconds int `json:"quotaPollIntervalSeconds,omitempty"`
 	// QuotaHistoryPath is the JSONL file used to persist quota observations.
@@ -54,6 +58,32 @@ type Config struct {
 	ClientVersion string `json:"clientVersion,omitempty"`
 	// MaxConcurrentGenerations bounds simultaneously processed generation requests.
 	MaxConcurrentGenerations int `json:"maxConcurrentGenerations,omitempty"`
+}
+
+// Credentials is a complete token, OAuth client, and account identity replacement.
+type Credentials struct {
+	AccessToken       string
+	RefreshToken      string
+	OAuthClientID     string
+	OAuthClientSecret string
+	AccountID         string
+	AccountEmail      string
+	AccountName       string
+}
+
+// CommitError means the configuration was replaced, but directory durability was
+// not confirmed. Callers must use the committed credentials rather than report
+// that the old configuration remains active.
+type CommitError struct {
+	Err error
+}
+
+func (err *CommitError) Error() string {
+	return "configuration was replaced, but its durability could not be confirmed; retry saving to confirm durability"
+}
+
+func (err *CommitError) Unwrap() error {
+	return err.Err
 }
 
 // Load reads ~/.config/antigravity-proxy/config.json, applies defaults and
@@ -100,8 +130,17 @@ func Load() (Config, string, error) {
 	if err := validateListenAddress(cfg.Host, cfg.APIKey); err != nil {
 		return Config{}, "", err
 	}
-	envString("ANTIGRAVITY_ACCESS_TOKEN", &cfg.AccessToken)
-	envString("ANTIGRAVITY_REFRESH_TOKEN", &cfg.RefreshToken)
+	accessToken, accessSet := os.LookupEnv("ANTIGRAVITY_ACCESS_TOKEN")
+	refreshToken, refreshSet := os.LookupEnv("ANTIGRAVITY_REFRESH_TOKEN")
+	if accessSet {
+		cfg.AccessToken = accessToken
+	}
+	if refreshSet {
+		cfg.RefreshToken = refreshToken
+	}
+	if accessSet || refreshSet {
+		cfg.AccountID, cfg.AccountEmail, cfg.AccountName = "", "", ""
+	}
 	// Load OAuth sources without requiring them for explicit access-token use.
 	// Login and Refresh validate the selected pair when OAuth is actually needed.
 	if id, secret, provided := oauthEnvironmentPair(); provided {
@@ -315,9 +354,10 @@ func rejectDuplicateConfigFields(data []byte) error {
 	return err
 }
 
-// UpdateCredentials rereads disk and changes only the OAuth pair and token fields.
-// It never persists defaults, environment overrides, or a stale login snapshot.
-func UpdateCredentials(path, accessToken, refreshToken, clientID, clientSecret string) error {
+// UpdateCredentials rereads disk and replaces tokens, the OAuth pair, and account
+// identity as a set. It never persists defaults, environment overrides, or a
+// stale login snapshot. A CommitError means the replacement already committed.
+func UpdateCredentials(path string, creds Credentials) error {
 	var disk Config
 	data, err := readConfig(path, &disk)
 	if err != nil {
@@ -333,15 +373,20 @@ func UpdateCredentials(path, accessToken, refreshToken, clientID, clientSecret s
 	// before inserting canonical keys so an old static token cannot survive login.
 	for key := range fields {
 		if strings.EqualFold(key, "accessToken") || strings.EqualFold(key, "refreshToken") ||
-			strings.EqualFold(key, "oauthClientId") || strings.EqualFold(key, "oauthClientSecret") {
+			strings.EqualFold(key, "oauthClientId") || strings.EqualFold(key, "oauthClientSecret") ||
+			strings.EqualFold(key, "accountId") || strings.EqualFold(key, "accountEmail") ||
+			strings.EqualFold(key, "accountName") {
 			delete(fields, key)
 		}
 	}
 	for key, value := range map[string]string{
-		"accessToken":       accessToken,
-		"refreshToken":      refreshToken,
-		"oauthClientId":     clientID,
-		"oauthClientSecret": clientSecret,
+		"accessToken":       creds.AccessToken,
+		"refreshToken":      creds.RefreshToken,
+		"oauthClientId":     creds.OAuthClientID,
+		"oauthClientSecret": creds.OAuthClientSecret,
+		"accountId":         creds.AccountID,
+		"accountEmail":      creds.AccountEmail,
+		"accountName":       creds.AccountName,
 	} {
 		if value == "" {
 			continue
@@ -365,17 +410,71 @@ func Save(path string, cfg Config) error {
 	return saveConfigBytes(path, data)
 }
 
+type configTemporaryFile interface {
+	Name() string
+	Write([]byte) (int, error)
+	Sync() error
+	Close() error
+}
+
+type configDirectory interface {
+	Sync() error
+	Close() error
+}
+
+// configFilesystem is supplied per save so fault injection cannot affect other
+// concurrent callers. A nil openDirectory means directory sync is unsupported.
+type configFilesystem struct {
+	mkdirAll      func(string, os.FileMode) error
+	createTemp    func(string, string) (configTemporaryFile, error)
+	openDirectory func(string) (configDirectory, error)
+	rename        func(string, string) error
+	remove        func(string) error
+}
+
+func localConfigFilesystem() configFilesystem {
+	fs := configFilesystem{
+		mkdirAll: os.MkdirAll,
+		createTemp: func(dir, pattern string) (configTemporaryFile, error) {
+			return os.CreateTemp(dir, pattern)
+		},
+		rename: os.Rename,
+		remove: os.Remove,
+	}
+	// Go cannot open directories for Sync on Windows.
+	if runtime.GOOS != "windows" {
+		fs.openDirectory = func(path string) (configDirectory, error) {
+			return os.Open(path)
+		}
+	}
+	return fs
+}
+
 func saveConfigBytes(path string, data []byte) error {
+	return saveConfigBytesWithFS(path, data, localConfigFilesystem())
+}
+
+func saveConfigBytesWithFS(path string, data []byte, fs configFilesystem) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := fs.mkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create config directory: %w", err)
 	}
-	file, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-*")
+	// Open before rename: failure must leave the previous configuration intact.
+	var directory configDirectory
+	if fs.openDirectory != nil {
+		var err error
+		directory, err = fs.openDirectory(dir)
+		if err != nil {
+			return fmt.Errorf("open config directory for sync: %w", err)
+		}
+		defer directory.Close()
+	}
+	file, err := fs.createTemp(dir, "."+filepath.Base(path)+"-*")
 	if err != nil {
 		return fmt.Errorf("create temporary config: %w", err)
 	}
 	tmp := file.Name()
-	defer os.Remove(tmp)
+	defer fs.remove(tmp)
 	defer file.Close()
 	if _, err := file.Write(append(data, '\n')); err != nil {
 		return fmt.Errorf("write config: %w", err)
@@ -386,20 +485,13 @@ func saveConfigBytes(path string, data []byte) error {
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close config: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := fs.rename(tmp, path); err != nil {
 		return fmt.Errorf("replace config: %w", err)
 	}
-	// Go cannot open directories for Sync on Windows.
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-	directory, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("open config directory for sync: %w", err)
-	}
-	defer directory.Close()
-	if err := directory.Sync(); err != nil {
-		return fmt.Errorf("sync config directory: %w", err)
+	if directory != nil {
+		if err := directory.Sync(); err != nil {
+			return &CommitError{Err: err}
+		}
 	}
 	return nil
 }

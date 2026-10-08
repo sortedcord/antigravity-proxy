@@ -9,7 +9,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -286,4 +289,281 @@ func newUpstreamService(cfg config.Config) *Service {
 		},
 	})
 	return NewService(cfg, fetcher.Fetch)
+}
+
+func awaitStatusSignal(t *testing.T, signal <-chan struct{}, failure string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(3 * time.Second):
+		t.Fatal(failure)
+	}
+}
+
+func TestServicePrepareWithoutPollingAndCloseReleasesHistory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prepared.jsonl")
+	var calls atomic.Int64
+	fetch := func(context.Context) (quota.Snapshot, error) {
+		calls.Add(1)
+		return observation(observationTime(), 0.5), nil
+	}
+	service := NewService(config.Config{QuotaHistoryPath: path}, fetch)
+	defer service.Close()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("constructor opened history: %v", err)
+	}
+	if err := service.Start(nil); err == nil {
+		t.Fatal("Start accepted nil context")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("invalid Start opened history: %v", err)
+	}
+	if err := service.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	collector := service.quotaCollector()
+	if err := service.Prepare(); err != nil || service.quotaCollector() != collector {
+		t.Fatalf("repeated preparation replaced its collector: %v", err)
+	}
+	service.TriggerPoll()
+	if collector.workerDone != nil || collector.started || calls.Load() != 0 {
+		t.Fatal("Prepare or TriggerPoll started unrequested collection")
+	}
+	contender := NewService(config.Config{QuotaHistoryPath: path}, fetch)
+	defer contender.Close()
+	if err := contender.Prepare(); err == nil {
+		t.Fatal("prepared history was not exclusively locked")
+	}
+	if err := service.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Prepare(); err == nil {
+		t.Fatal("closed service prepared again")
+	}
+	if err := service.Start(context.Background()); err == nil {
+		t.Fatal("closed service started")
+	}
+	if err := contender.Prepare(); err != nil {
+		t.Fatalf("prepared Close did not release history: %v", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatal("preparation fetched quota")
+	}
+}
+
+func TestServiceFailedPreparationLeavesIndependentActiveServiceUsable(t *testing.T) {
+	dir := t.TempDir()
+	var calls atomic.Int64
+	sample := observation(observationTime(), 0.75)
+	active := NewService(config.Config{QuotaHistoryPath: filepath.Join(dir, "active.jsonl"), QuotaPollIntervalSeconds: 3600}, func(context.Context) (quota.Snapshot, error) {
+		calls.Add(1)
+		return sample, nil
+	})
+	defer active.Close()
+	if err := active.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	collector := active.quotaCollector()
+	awaitState(t, collector, func(_ quota.Snapshot, exists bool, _ PollInfo) bool { return exists })
+	blocked := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(blocked, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	candidate := NewService(config.Config{QuotaHistoryPath: filepath.Join(blocked, "candidate.jsonl")}, func(context.Context) (quota.Snapshot, error) {
+		t.Error("failed preparation fetched quota")
+		return quota.Snapshot{}, nil
+	})
+	defer candidate.Close()
+	if err := candidate.Prepare(); err == nil {
+		t.Fatal("Prepare accepted a non-directory parent")
+	}
+	if candidate.quotaCollector() != nil || active.quotaCollector() != collector {
+		t.Fatal("failed preparation altered an independently active collector")
+	}
+	active.TriggerPoll()
+	awaitState(t, collector, func(_ quota.Snapshot, exists bool, _ PollInfo) bool {
+		page, err := collector.History(Query{})
+		return exists && calls.Load() >= 2 && err == nil && page.Total == 8
+	})
+	requireSnapshot(t, collector, sample)
+	response := httptest.NewRecorder()
+	active.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/status/limit", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("old status service unavailable after preparation failure: %d", response.Code)
+	}
+}
+
+func TestAccountHistoryPathsSeparateAndReloadPreparedHistory(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "history.jsonl")
+	legacy := []byte("legacy history must remain untouched\n")
+	if err := os.WriteFile(base, legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	firstPath := AccountHistoryPath(base, "../private/account")
+	secondPath := AccountHistoryPath(base, "another account")
+	if firstPath != AccountHistoryPath(base, "../private/account") || firstPath == secondPath || firstPath == base || AccountHistoryPath(base, "") == base {
+		t.Fatal("namespace paths are not stable and isolated")
+	}
+	if filepath.Dir(firstPath) != filepath.Dir(base) || filepath.Ext(firstPath) != ".jsonl" || strings.Contains(filepath.Base(firstPath), "private") {
+		t.Fatalf("namespace leaked into an unsafe history path: %s", firstPath)
+	}
+	firstSample := observation(observationTime(), 0.8)
+	secondSample := observation(observationTime().Add(time.Minute), 0.2)
+	first := NewService(config.Config{QuotaHistoryPath: firstPath, QuotaPollIntervalSeconds: 3600}, func(context.Context) (quota.Snapshot, error) { return firstSample, nil })
+	defer first.Close()
+	if err := first.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	prepared := first.quotaCollector()
+	if err := first.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if first.quotaCollector() != prepared {
+		t.Fatal("Start replaced prepared history")
+	}
+	awaitState(t, prepared, func(_ quota.Snapshot, exists bool, _ PollInfo) bool { return exists })
+	firstData, err := os.ReadFile(firstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := NewService(config.Config{QuotaHistoryPath: secondPath, QuotaPollIntervalSeconds: 3600}, func(context.Context) (quota.Snapshot, error) { return secondSample, nil })
+	defer second.Close()
+	if err := second.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, _ := second.quotaCollector().Latest(); exists {
+		t.Fatal("different namespace loaded the old account's sample")
+	}
+	if err := second.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	awaitState(t, second.quotaCollector(), func(_ quota.Snapshot, exists bool, _ PollInfo) bool { return exists })
+	requireSnapshot(t, prepared, firstSample)
+	requireSnapshot(t, second.quotaCollector(), secondSample)
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(firstPath); err != nil || !bytes.Equal(got, firstData) {
+		t.Fatalf("new account changed old durable history: %v", err)
+	}
+	for _, test := range []struct {
+		path   string
+		sample quota.Snapshot
+	}{
+		{firstPath, firstSample},
+		{secondPath, secondSample},
+	} {
+		if test.path == secondPath {
+			if err := second.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		reloaded := NewService(config.Config{QuotaHistoryPath: test.path}, func(context.Context) (quota.Snapshot, error) {
+			t.Error("prepared restart fetched quota")
+			return quota.Snapshot{}, nil
+		})
+		defer reloaded.Close()
+		if err := reloaded.Prepare(); err != nil {
+			t.Fatal(err)
+		}
+		requireSnapshot(t, reloaded.quotaCollector(), test.sample)
+		page, err := reloaded.quotaCollector().History(Query{})
+		if err != nil || page.Total != 4 {
+			t.Fatalf("prepared namespace history not reloaded: %+v, %v", page, err)
+		}
+		response := httptest.NewRecorder()
+		reloaded.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/status/limit", nil))
+		var result limitResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || response.Code != http.StatusOK || !result.ObservedAt.Equal(test.sample.ObservedAt) {
+			t.Fatalf("prepared status omitted loaded history: %s, %v", response.Body.String(), err)
+		}
+	}
+	if got, err := os.ReadFile(base); err != nil || !bytes.Equal(got, legacy) {
+		t.Fatalf("legacy history was modified: %v", err)
+	}
+}
+
+func TestServiceCanceledStartAndDuplicateStart(t *testing.T) {
+	var calls atomic.Int64
+	service := NewService(config.Config{QuotaHistoryPath: filepath.Join(t.TempDir(), "canceled")}, func(context.Context) (quota.Snapshot, error) {
+		calls.Add(1)
+		return quota.Snapshot{}, nil
+	})
+	defer service.Close()
+	if err := service.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	awaitStatusSignal(t, service.quotaCollector().workerDone, "canceled start did not stop its worker")
+	if calls.Load() != 0 {
+		t.Fatal("already-canceled start fetched quota")
+	}
+	if err := service.Start(context.Background()); err == nil {
+		t.Fatal("duplicate Start succeeded after parent cancellation")
+	}
+}
+
+func TestServiceConcurrentCloseCancelsAndJoinsWithoutBlockingStatusReads(t *testing.T) {
+	entered := make(chan struct{})
+	readAfterCancellation := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFetch := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseFetch()
+	var service *Service
+	service = NewService(config.Config{QuotaHistoryPath: filepath.Join(t.TempDir(), "closing")}, func(ctx context.Context) (quota.Snapshot, error) {
+		close(entered)
+		<-ctx.Done()
+		// Fetch cleanup may use status methods: Close must not hold the service
+		// mutex while joining the collector worker.
+		service.TriggerPoll()
+		service.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/status/limit", nil))
+		close(readAfterCancellation)
+		<-release
+		return quota.Snapshot{}, ctx.Err()
+	})
+	if err := service.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	awaitStatusSignal(t, entered, "initial fetch did not start")
+	var closers sync.WaitGroup
+	errors := make(chan error, 3)
+	for range 3 {
+		closers.Add(1)
+		go func() {
+			defer closers.Done()
+			errors <- service.Close()
+		}()
+	}
+	awaitStatusSignal(t, readAfterCancellation, "Close blocked fetch cleanup status reads")
+	select {
+	case err := <-errors:
+		t.Fatalf("Close returned before fetch cleanup finished: %v", err)
+	default:
+	}
+	if err := service.Prepare(); err == nil {
+		t.Fatal("Prepare accepted a closing service")
+	}
+	if err := service.Start(context.Background()); err == nil {
+		t.Fatal("Start accepted a closing service")
+	}
+	releaseFetch()
+	joined := make(chan struct{})
+	go func() { closers.Wait(); close(joined) }()
+	awaitStatusSignal(t, joined, "concurrent Close calls did not join worker")
+	for range 3 {
+		if err := <-errors; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if service.quotaCollector() != nil {
+		t.Fatal("closed service retained its collector")
+	}
 }

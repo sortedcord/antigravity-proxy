@@ -426,9 +426,8 @@ func TestGenerateContentRejectsConflictingSchemaFields(t *testing.T) {
 	} {
 		for _, stream := range []bool{false, true} {
 			recorder := httptest.NewRecorder()
-			// No credential is configured: conflicts must be rejected before
-			// authentication/discovery or any upstream transport is attempted.
-			New(config.Config{}).handleGenerateContent(recorder, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body)), "native-model", stream)
+			// Conflicts must be rejected before discovery or any upstream transport is attempted.
+			New(config.Config{AccessToken: "mock-token"}).handleGenerateContent(recorder, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body)), "native-model", stream)
 			if recorder.Code != http.StatusBadRequest || recorder.Header().Get("Content-Type") != "application/json" || !json.Valid(recorder.Body.Bytes()) || !strings.Contains(recorder.Body.String(), "mutually exclusive") {
 				t.Fatalf("conflicting schema fields = %d %v %s", recorder.Code, recorder.Header(), recorder.Body.String())
 			}

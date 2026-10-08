@@ -107,31 +107,11 @@ func login(cfg config.Config, path string, output io.Writer) error {
 	defer listener.Close()
 	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/oauth-callback", callbackPort)
 
-	stateBytes := make([]byte, 24)
-	verifierBytes := make([]byte, 32)
-	if _, err := rand.Read(stateBytes); err != nil {
+	authReq, err := buildAuthorizationRequest(clientID, redirectURI)
+	if err != nil {
 		return err
 	}
-	if _, err := rand.Read(verifierBytes); err != nil {
-		return err
-	}
-	state := hex.EncodeToString(stateBytes)
-	verifier := base64.RawURLEncoding.EncodeToString(verifierBytes)
-	digest := sha256.Sum256([]byte(verifier))
-	challenge := base64.RawURLEncoding.EncodeToString(digest[:])
-
-	query := url.Values{
-		"client_id":             {clientID},
-		"redirect_uri":          {redirectURI},
-		"response_type":         {"code"},
-		"scope":                 {strings.Join(oauthScopes, " ")},
-		"access_type":           {"offline"},
-		"prompt":                {"consent"},
-		"code_challenge":        {challenge},
-		"code_challenge_method": {"S256"},
-		"state":                 {state},
-	}
-	fmt.Fprintf(output, "Open this URL to authorize Antigravity Proxy:\n\n%s?%s\n\nWaiting for the local callback on port %d...\n", oauthAuthURL, query.Encode(), callbackPort)
+	fmt.Fprintf(output, "Open this URL to authorize Antigravity Proxy:\n\n%s\n\nWaiting for the local callback on port %d...\n", authReq.authURL, callbackPort)
 
 	type callback struct {
 		code string
@@ -140,11 +120,14 @@ func login(cfg config.Config, path string, output io.Writer) error {
 	result := make(chan callback, 1)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/oauth-callback", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if received := r.URL.Query().Get("state"); received != state {
+		if received := r.URL.Query().Get("state"); received != authReq.state {
 			http.Error(w, "OAuth state mismatch", http.StatusBadRequest)
 			return
 		}
@@ -170,7 +153,13 @@ func login(cfg config.Config, path string, output io.Writer) error {
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(listener) }()
-	defer server.Close()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			_ = server.Close()
+		}
+	}()
 
 	var received callback
 	select {
@@ -186,11 +175,15 @@ func login(cfg config.Config, path string, output io.Writer) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	tokens, err := exchangeOAuthCode(ctx, received.code, verifier, redirectURI, clientID, clientSecret)
+	tokens, err := exchangeOAuthCode(ctx, received.code, authReq.verifier, redirectURI, clientID, clientSecret)
 	if err != nil {
 		return err
 	}
-	if err := saveLoginTokens(path, tokens, clientID, clientSecret); err != nil {
+	user, err := FetchUserInfo(ctx, tokens.AccessToken)
+	if err != nil {
+		return err
+	}
+	if err := saveLoginTokens(path, tokens, clientID, clientSecret, user); err != nil {
 		return err
 	}
 	if tokens.RefreshToken == "" {
@@ -200,18 +193,29 @@ func login(cfg config.Config, path string, output io.Writer) error {
 	return nil
 }
 
-func saveLoginTokens(path string, tokens Tokens, clientID, clientSecret string) error {
-	if tokens.AccessToken == "" {
+func saveLoginTokens(path string, tokens Tokens, clientID, clientSecret string, user UserInfo) error {
+	if strings.TrimSpace(tokens.AccessToken) == "" {
 		return errors.New("Google returned no access token")
+	}
+	if err := validateUserInfo(user); err != nil {
+		return err
 	}
 	accessToken := ""
 	if tokens.RefreshToken == "" {
 		accessToken = tokens.AccessToken
 	}
-	return config.UpdateCredentials(path, accessToken, tokens.RefreshToken, clientID, clientSecret)
+	return config.UpdateCredentials(path, config.Credentials{
+		AccessToken: accessToken, RefreshToken: tokens.RefreshToken,
+		OAuthClientID: clientID, OAuthClientSecret: clientSecret,
+		AccountID: user.ID, AccountEmail: user.Email, AccountName: user.Name,
+	})
 }
 
 func exchangeOAuthCode(ctx context.Context, code, verifier, redirectURI, clientID, clientSecret string) (Tokens, error) {
+	return exchangeOAuthCodeWithClient(ctx, &http.Client{Timeout: 30 * time.Second}, code, verifier, redirectURI, clientID, clientSecret)
+}
+
+func exchangeOAuthCodeWithClient(ctx context.Context, client *http.Client, code, verifier, redirectURI, clientID, clientSecret string) (Tokens, error) {
 	form := url.Values{
 		"client_id":     {clientID},
 		"client_secret": {clientSecret},
@@ -225,7 +229,7 @@ func exchangeOAuthCode(ctx context.Context, code, verifier, redirectURI, clientI
 		return Tokens{}, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return Tokens{}, errors.New("exchange OAuth code: token endpoint request failed")
 	}
@@ -240,9 +244,57 @@ func exchangeOAuthCode(ctx context.Context, code, verifier, redirectURI, clientI
 	return tokens, nil
 }
 
+type authRequestParams struct {
+	state     string
+	verifier  string
+	challenge string
+	authURL   string
+}
+
+func buildAuthorizationRequest(clientID, redirectURI string) (authRequestParams, error) {
+	stateBytes := make([]byte, 24)
+	verifierBytes := make([]byte, 32)
+	if _, err := rand.Read(stateBytes); err != nil {
+		return authRequestParams{}, err
+	}
+	if _, err := rand.Read(verifierBytes); err != nil {
+		return authRequestParams{}, err
+	}
+	state := hex.EncodeToString(stateBytes)
+	verifier := base64.RawURLEncoding.EncodeToString(verifierBytes)
+	digest := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(digest[:])
+
+	query := url.Values{
+		"client_id":             {clientID},
+		"redirect_uri":          {redirectURI},
+		"response_type":         {"code"},
+		"scope":                 {strings.Join(oauthScopes, " ")},
+		"access_type":           {"offline"},
+		"prompt":                {"consent"},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+		"state":                 {state},
+	}
+	return authRequestParams{
+		state:     state,
+		verifier:  verifier,
+		challenge: challenge,
+		authURL:   fmt.Sprintf("%s?%s", oauthAuthURL, query.Encode()),
+	}, nil
+}
+
 // Refresh exchanges cfg.RefreshToken using only its saved or environment client
 // pair. It never saves tokens.
 func Refresh(ctx context.Context, cfg config.Config) (Tokens, error) {
+	return RefreshWithClient(ctx, cfg, &http.Client{Timeout: 30 * time.Second})
+}
+
+// RefreshWithClient uses the supplied OAuth client without mutating global transports.
+func RefreshWithClient(ctx context.Context, cfg config.Config, client *http.Client) (Tokens, error) {
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
 	clientID, clientSecret, err := oauthClientCredentials(cfg)
 	if err != nil {
 		return Tokens{}, err
@@ -258,7 +310,7 @@ func Refresh(ctx context.Context, cfg config.Config) (Tokens, error) {
 		return Tokens{}, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return Tokens{}, errors.New("refresh Google OAuth token: token endpoint request failed")
 	}

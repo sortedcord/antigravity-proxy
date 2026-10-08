@@ -73,7 +73,7 @@ func TestLoginPersistenceDoesNotLeakEnvironmentOrDefaults(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := saveLoginTokens(path, Tokens{AccessToken: "new-access", RefreshToken: "new-refresh"}, "new-id", "new-secret"); err != nil {
+			if err := saveLoginTokens(path, Tokens{AccessToken: "new-access", RefreshToken: "new-refresh"}, "new-id", "new-secret", testUserInfo()); err != nil {
 				t.Fatal(err)
 			}
 			data, err := os.ReadFile(path)
@@ -87,7 +87,7 @@ func TestLoginPersistenceDoesNotLeakEnvironmentOrDefaults(t *testing.T) {
 			if string(saved["refreshToken"]) != `"new-refresh"` || string(saved["oauthClientId"]) != `"new-id"` || string(saved["oauthClientSecret"]) != `"new-secret"` {
 				t.Fatal("login did not save its matching credentials")
 			}
-			for _, name := range []string{"accessToken", "refreshToken", "oauthClientId", "oauthClientSecret"} {
+			for _, name := range []string{"accessToken", "refreshToken", "oauthClientId", "oauthClientSecret", "accountId", "accountEmail", "accountName"} {
 				delete(saved, name)
 			}
 			want := make(map[string]json.RawMessage)
@@ -112,7 +112,7 @@ func TestLoginPersistenceRejectsUnsafeDiskWithoutChangingIt(t *testing.T) {
 			if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
 				t.Fatal(err)
 			}
-			if err := saveLoginTokens(path, Tokens{AccessToken: "new"}, "id", "secret"); err == nil {
+			if err := saveLoginTokens(path, Tokens{AccessToken: "new"}, "id", "secret", testUserInfo()); err == nil {
 				t.Fatal("login overwrote invalid disk configuration")
 			}
 			data, err := os.ReadFile(path)
@@ -131,7 +131,7 @@ func TestLoginPersistenceRejectsUnsafeDiskWithoutChangingIt(t *testing.T) {
 	if err := os.Chmod(path, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := saveLoginTokens(path, Tokens{AccessToken: "new"}, "id", "secret"); err == nil {
+	if err := saveLoginTokens(path, Tokens{AccessToken: "new"}, "id", "secret", testUserInfo()); err == nil {
 		t.Fatal("login accepted a nonprivate saved configuration")
 	}
 }
@@ -149,7 +149,7 @@ func TestConcurrentLoginPersistenceKeepsMatchingCredentials(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			value := fmt.Sprintf("login-%d", i)
-			results <- saveLoginTokens(path, Tokens{AccessToken: value, RefreshToken: value}, value, value)
+			results <- saveLoginTokens(path, Tokens{AccessToken: value, RefreshToken: value}, value, value, UserInfo{ID: value, Email: value + "@example.com", Name: value})
 		}(i)
 	}
 	wg.Wait()
@@ -169,6 +169,9 @@ func TestConcurrentLoginPersistenceKeepsMatchingCredentials(t *testing.T) {
 	}
 	if saved.OAuthClientID != saved.OAuthClientSecret || saved.OAuthClientID != saved.RefreshToken || saved.AccessToken != "" || saved.ProjectID != "keep" || saved.QuotaHistoryMaxSamples != 33 {
 		t.Fatal("concurrent logins lost settings or mismatched token and client pair")
+	}
+	if saved.AccountID != saved.RefreshToken || saved.AccountEmail != saved.RefreshToken+"@example.com" || saved.AccountName != saved.RefreshToken {
+		t.Fatal("concurrent logins mismatched identity and credentials")
 	}
 	entries, err := os.ReadDir(filepath.Dir(path))
 	if err != nil || len(entries) != 1 {
@@ -244,7 +247,7 @@ func TestLoginPersistenceCanonicalizesUniqueCredentialAliases(t *testing.T) {
 				if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
 					t.Fatal(err)
 				}
-				if err := saveLoginTokens(path, Tokens{AccessToken: "new-access", RefreshToken: refreshToken}, "new-id", "new-secret"); err != nil {
+				if err := saveLoginTokens(path, Tokens{AccessToken: "new-access", RefreshToken: refreshToken}, "new-id", "new-secret", testUserInfo()); err != nil {
 					t.Fatal(err)
 				}
 				cfg, _, err := config.Load()

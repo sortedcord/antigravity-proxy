@@ -12,9 +12,13 @@ import (
 // The pre-header deadline includes dialing and request upload. Body inactivity
 // resets on each read; finite RPCs additionally carry their total context deadline.
 func newUpstreamClient(headerTimeout, idleTimeout time.Duration) *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.ResponseHeaderTimeout = headerTimeout
-	return &http.Client{Transport: &idleResponseTransport{base: transport, headerTimeout: headerTimeout, timeout: idleTimeout}}
+	var baseRoundTripper http.RoundTripper = http.DefaultTransport
+	if dt, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport := dt.Clone()
+		transport.ResponseHeaderTimeout = headerTimeout
+		baseRoundTripper = transport
+	}
+	return &http.Client{Transport: &idleResponseTransport{base: baseRoundTripper, headerTimeout: headerTimeout, timeout: idleTimeout}}
 }
 
 type idleResponseTransport struct {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // ServeHTTP serves health, model discovery, native Gemini generation, and quota status.
@@ -20,9 +21,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/health" && r.Method == http.MethodGet:
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "credential_configured": p.cfg.AccessToken != "" || p.cfg.RefreshToken != ""})
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "credential_configured": p.hasCredentials()})
 	case r.URL.Path == "/models" && r.Method == http.MethodGet:
 		if !p.authorized(w, r) {
+			return
+		}
+		if !p.hasCredentials() {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Google authentication unavailable"})
 			return
 		}
 		p.handleModels(w, r)
@@ -31,6 +36,33 @@ func (p *Proxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		p.StatusHandler.ServeHTTP(w, r)
+	case r.URL.Path == "/status/account":
+		if !p.authorized(w, r) {
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "status endpoints require GET"})
+			return
+		}
+		p.handleStatusAccount(w, r)
+	case r.URL.Path == "/config/login":
+		w.Header().Set("Cache-Control", "no-store")
+		if p.cfg.APIKey == "" {
+			rejectUnreadBody(w, r)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "API_KEY must be configured on the server to use /config/login"})
+			return
+		}
+		if !p.authorized(w, r) {
+			return
+		}
+		if p.LoginHandler == nil {
+			rejectUnreadBody(w, r)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "runtime login is not configured"})
+			return
+		}
+		p.LoginHandler.ServeHTTP(w, r)
 	case r.URL.Path == "/v1beta/models" || strings.HasPrefix(r.URL.Path, "/v1beta/models/"):
 		if !p.authorized(w, r) {
 			return
@@ -71,6 +103,14 @@ func (p *Proxy) authorized(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
+// Reject without waiting for HTTP/1's automatic unread-body drain.
+func rejectUnreadBody(w http.ResponseWriter, r *http.Request) {
+	if r.ProtoMajor == 1 && r.Body != nil && r.Body != http.NoBody {
+		w.Header().Set("Connection", "close")
+		_ = http.NewResponseController(w).SetReadDeadline(time.Now())
+	}
+}
+
 func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 	token, err := p.accessToken(r.Context())
 	if err != nil {
@@ -101,6 +141,20 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
+}
+
+func (p *Proxy) handleStatusAccount(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if !p.hasCredentials() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Google authentication unavailable"})
+		return
+	}
+	details, err := p.AccountDetails(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Google authentication unavailable"})
+		return
+	}
+	writeJSON(w, http.StatusOK, details)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

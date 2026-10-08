@@ -41,8 +41,35 @@ type Proxy struct {
 	catalog         modelCatalogCache
 	catalogEpoch    uint64
 
-	// StatusHandler is wired before serving; status owns its state and lifecycle.
+	accountMu          sync.RWMutex
+	accountEmail       string
+	accountName        string
+	accountID          string
+	subscription       *SubscriptionInfo
+	subscriptionStatus string
+
+	profileClient   *http.Client
+	profileResolved func(context.Context, oauth.UserInfo) error
+
+	// Handlers are wired before publication by the runtime coordinator.
 	StatusHandler http.Handler
+	LoginHandler  http.Handler
+}
+
+// SubscriptionInfo describes an authoritative tier returned by the provider.
+type SubscriptionInfo struct {
+	ID          string `json:"id,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	SourceField string `json:"source_field,omitempty"`
+}
+
+// AccountDetails describes the authenticated Google account and tier.
+type AccountDetails struct {
+	CredentialConfigured bool              `json:"credential_configured"`
+	Email                string            `json:"email,omitempty"`
+	Name                 string            `json:"name,omitempty"`
+	Subscription         *SubscriptionInfo `json:"subscription"`
+	SubscriptionStatus   string            `json:"subscription_status"`
 }
 
 type upstreamError struct {
@@ -62,19 +89,143 @@ func (e *upstreamError) HTTPStatus() int { return e.Status }
 // Wire StatusHandler before serving quota routes. Direct callers receive defaults
 // for optional settings normally populated by config.Load.
 func New(cfg config.Config) *Proxy {
+	return newProxy(cfg, nil, nil, nil)
+}
+
+func newProxy(cfg config.Config, client *http.Client, slots chan struct{}, profileClient *http.Client) *Proxy {
 	if cfg.ClientVersion == "" {
 		cfg.ClientVersion = config.DefaultClientVersion
 	}
 	if cfg.MaxConcurrentGenerations <= 0 {
 		cfg.MaxConcurrentGenerations = config.DefaultMaxConcurrentGenerations
 	}
+	if client == nil {
+		client = newUpstreamClient(5*time.Minute, 5*time.Minute)
+	}
+	if slots == nil {
+		slots = make(chan struct{}, cfg.MaxConcurrentGenerations)
+	}
+	if profileClient == nil {
+		profileClient = &http.Client{Timeout: 30 * time.Second}
+	}
 	return &Proxy{
 		cfg:             cfg,
-		client:          newUpstreamClient(5*time.Minute, 5*time.Minute),
+		client:          client,
 		rpcTimeout:      5 * time.Minute,
 		projectID:       cfg.ProjectID,
-		generationSlots: make(chan struct{}, cfg.MaxConcurrentGenerations),
+		generationSlots: slots,
+		accountID:       cfg.AccountID,
+		accountEmail:    cfg.AccountEmail,
+		accountName:     cfg.AccountName,
+		profileClient:   profileClient,
 	}
+}
+
+func (p *Proxy) hasCredentials() bool {
+	return p.cfg.AccessToken != "" || p.cfg.RefreshToken != ""
+}
+
+// AccountDetails returns account information including email, name, and tier.
+func (p *Proxy) AccountDetails(ctx context.Context) (AccountDetails, error) {
+	if !p.hasCredentials() {
+		return AccountDetails{
+			CredentialConfigured: false,
+			Subscription:         nil,
+			SubscriptionStatus:   "not_reported",
+		}, errors.New("no Google credential configured")
+	}
+
+	token, err := p.accessToken(ctx)
+	if err != nil {
+		return AccountDetails{
+			CredentialConfigured: true,
+			Subscription:         nil,
+			SubscriptionStatus:   "unavailable",
+		}, err
+	}
+
+	p.accountMu.RLock()
+	email := p.accountEmail
+	name := p.accountName
+	accountID := p.accountID
+	sub := p.subscription
+	subStatus := p.subscriptionStatus
+	p.accountMu.RUnlock()
+
+	if email == "" || accountID == "" {
+		userInfo, err := oauth.FetchUserInfoWithClient(ctx, token, p.profileClient)
+		if err != nil {
+			return AccountDetails{}, err
+		}
+		p.accountMu.Lock()
+		p.accountEmail = userInfo.Email
+		p.accountName = userInfo.Name
+		p.accountID = userInfo.ID
+		email = userInfo.Email
+		name = userInfo.Name
+		p.accountMu.Unlock()
+	}
+	if p.cfg.AccountID == "" && p.profileResolved != nil {
+		p.accountMu.RLock()
+		identity := oauth.UserInfo{ID: p.accountID, Email: p.accountEmail, Name: p.accountName}
+		p.accountMu.RUnlock()
+		if err := p.profileResolved(ctx, identity); err != nil {
+			return AccountDetails{}, err
+		}
+	}
+
+	if subStatus == "" || subStatus == "unavailable" {
+		tier, status, _ := p.fetchSubscriptionTier(ctx, token)
+		p.accountMu.Lock()
+		p.subscription = tier
+		p.subscriptionStatus = status
+		sub = tier
+		subStatus = status
+		p.accountMu.Unlock()
+	}
+
+	return AccountDetails{
+		CredentialConfigured: true,
+		Email:                email,
+		Name:                 name,
+		Subscription:         sub,
+		SubscriptionStatus:   subStatus,
+	}, nil
+}
+
+func (p *Proxy) fetchSubscriptionTier(ctx context.Context, token string) (*SubscriptionInfo, string, error) {
+	resp, err := p.postToAntigravity(ctx, token, "/v1internal:loadCodeAssist", "application/json", map[string]any{"metadata": clientMetadata(), "mode": 1})
+	if err != nil {
+		return nil, "unavailable", err
+	}
+	defer resp.Body.Close()
+	var load map[string]any
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&load); err != nil {
+		return nil, "unavailable", err
+	}
+	if paidTier, ok := load["paidTier"].(map[string]any); ok {
+		id, _ := paidTier["id"].(string)
+		name, _ := paidTier["name"].(string)
+		if id != "" || name != "" {
+			return &SubscriptionInfo{
+				ID:          id,
+				DisplayName: name,
+				SourceField: "paidTier",
+			}, "known", nil
+		}
+	}
+	if currentTier, ok := load["currentTier"].(map[string]any); ok {
+		id, _ := currentTier["id"].(string)
+		name, _ := currentTier["name"].(string)
+		if id != "" || name != "" {
+			return &SubscriptionInfo{
+				ID:          id,
+				DisplayName: name,
+				SourceField: "currentTier",
+			}, "known", nil
+		}
+	}
+	return nil, "not_reported", nil
 }
 
 // accessToken uses an explicit access token unchanged, or serializes refreshes
@@ -87,7 +238,7 @@ func (p *Proxy) accessToken(ctx context.Context) (string, error) {
 		return p.cfg.AccessToken, nil
 	}
 	if p.cfg.RefreshToken == "" {
-		return "", errors.New("no Google credential configured; run `antigravity-proxy login` or set ANTIGRAVITY_ACCESS_TOKEN")
+		return "", errors.New("no Google credential configured; use /config/login or configure credentials")
 	}
 	p.tokenMu.Lock()
 	defer p.tokenMu.Unlock()
@@ -102,7 +253,7 @@ func (p *Proxy) accessTokenLocked(ctx context.Context) (string, error) {
 	if p.cachedToken != "" && time.Until(p.tokenExpiresAt) > time.Minute {
 		return p.cachedToken, nil
 	}
-	tokens, err := oauth.Refresh(ctx, p.cfg)
+	tokens, err := oauth.RefreshWithClient(ctx, p.cfg, p.profileClient)
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
