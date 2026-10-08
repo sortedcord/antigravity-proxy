@@ -160,7 +160,10 @@ func (p *Proxy) handleStatusAccount(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	encoder := json.NewEncoder(w)
+	// Keep URL query separators intact when links are copied from JSON responses.
+	encoder.SetEscapeHTML(false)
+	_ = encoder.Encode(value)
 }
 
 func (p *Proxy) handleGeminiRoute(w http.ResponseWriter, r *http.Request) {

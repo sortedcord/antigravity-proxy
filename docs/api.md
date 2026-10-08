@@ -292,6 +292,14 @@ curl http://127.0.0.1:8080/config/login \
 }
 ```
 
+Open the `login_url` value without surrounding JSON quotes. To extract a plain URL with `jq`:
+```sh
+curl -sS http://127.0.0.1:8080/config/login \
+  -H "x-goog-api-key: $API_KEY" | jq -r '.login_url'
+```
+
+The response preserves literal `&` query separators for directly opening the link. If another client displays them as JSON escapes such as `\u0026`, decode the JSON first; those escapes are not URL separators and can cause Google's `Required parameter is missing: response_type` error.
+
 ### `POST /config/login`
 
 Completes runtime Google OAuth login. When authenticating from a browser on a different machine, the user can submit the authorization code and state (or the full redirected URL) from the browser address bar.

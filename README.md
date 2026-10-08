@@ -70,9 +70,9 @@ API_KEY="my-secret-key" HOST="0.0.0.0" ./antigravity-proxy serve
 You can also start the server before configuring a Google account:
 ```sh
 API_KEY="my-secret-key" ./antigravity-proxy serve
-curl http://127.0.0.1:8080/config/login -H "x-goog-api-key: my-secret-key"
+curl http://127.0.0.1:8080/config/login -H "x-goog-api-key: my-secret-key" | jq -r '.login_url'
 ```
-Open the returned `login_url`. If the browser cannot reach the proxy's loopback callback, submit the final redirect URL:
+With `jq` installed, this prints a plain authorization URL to open in your browser. Without `jq`, omit the pipe and open the `login_url` value from the JSON response without surrounding quotes. If the browser cannot reach the proxy's loopback callback, submit the final redirect URL:
 ```sh
 curl http://127.0.0.1:8080/config/login \
   -H "x-goog-api-key: my-secret-key" -H "Content-Type: application/json" \

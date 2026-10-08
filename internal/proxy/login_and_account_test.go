@@ -455,6 +455,35 @@ func TestRuntimeCommittedWarningPublishesMatchingDiskAndLiveAccount(t *testing.T
 	}
 }
 
+func TestRuntimeLoginURLCanBeCopiedFromJSON(t *testing.T) {
+	provider := newRuntimeProvider(t)
+	cfg, path := runtimeConfig(t, provider)
+	cfg.AccessToken, cfg.AccountID, cfg.AccountEmail, cfg.AccountName = "", "", "", ""
+	r := startRuntime(t, cfg, path, provider)
+	response := runtimeRequest(r, http.MethodGet, "/config/login", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("begin: %d %s", response.Code, response.Body.String())
+	}
+	var data struct {
+		LoginURL json.RawMessage `json:"login_url"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &data); err != nil {
+		t.Fatal(err)
+	}
+	// Preserve the literal string a user copies, rather than JSON-decoding it.
+	parsed, err := url.Parse(strings.Trim(string(data.LoginURL), `"`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	if got := query.Get("response_type"); got != "code" {
+		t.Fatalf("copied login URL response_type = %q, want code", got)
+	}
+	if got := query.Get("code_challenge_method"); got != "S256" {
+		t.Fatalf("copied login URL code_challenge_method = %q, want S256", got)
+	}
+}
+
 func TestRuntimeRequiresManagementKeyAndRejectsWithheldBody(t *testing.T) {
 	provider := newRuntimeProvider(t)
 	cfg, path := runtimeConfig(t, provider)
