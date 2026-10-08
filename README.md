@@ -5,19 +5,16 @@
 
 ---
 
-## What is Antigravity Proxy?
-
-Google Antigravity provides access to frontier models like **Gemini 3.8 Flash (Tiered)**, **Gemini 3.5 Flash Lite**, **Claude Sonnet**, and **Claude Opus**, but normally restricts usage to official IDE extensions.
-
 **Antigravity Proxy** brings your Antigravity account to Gemini-compatible applications. Run it locally or on your server, sign in with Google, and use a native **Gemini-to-Gemini** connection. It focuses on one thing: making Antigravity available through the Gemini API without converting requests and responses into another provider's format.
 
-## One thing, done right: Gemini to Gemini
+This is deliberately **not a universal API translator**. There is no OpenAI or Anthropic conversion layer inside the proxy. Video inputs, tool calls, thinking metadata, thought signatures, and streaming responses stay in Gemini's native format instead of being reshaped to fit another API.
 
-**Native Gemini requests in. Native Gemini responses out.**
+The narrow scope is the point: fewer format conversions, fewer opportunities to lose model-specific features, and a clear job for the proxy to do well. Claude and other models available through Antigravity use the same interface.
 
-This is deliberately not a universal API translator. There is no OpenAI or Anthropic conversion layer inside the proxy. Video inputs, tool calls, thinking metadata, thought signatures, and streaming responses stay in Gemini's native format instead of being reshaped to fit another API.
 
-The narrow scope is the point: fewer format conversions, fewer opportunities to lose model-specific features, and a clear job for the proxy to do well. Gemini is the API protocol here, not a restriction to Google-branded models; Claude and other models available through Antigravity use the same interface.
+<p align="center">
+  <img src="docs/assets/illustrations/model-access.svg" alt="Comparison of model access: the Antigravity app has a hardcoded list of 7 models, while Antigravity Proxy discovers 11 or more from the account, including the latest Gemini models, Claude and GPT models, image generation, legacy models, and new releases without waiting for Google's UI mapping updates.">
+</p>
 
 Use a Gemini-compatible client directly. If your coding harness needs an OpenAI-compatible API, add a gateway such as [Bifrost](https://getbifrost.ai/) in front. Translation belongs in that optional layer, not in this proxy.
 
@@ -69,6 +66,19 @@ To set an authentication key or listen on all interfaces:
 ```sh
 API_KEY="my-secret-key" HOST="0.0.0.0" ./antigravity-proxy serve
 ```
+
+You can also start the server before configuring a Google account:
+```sh
+API_KEY="my-secret-key" ./antigravity-proxy serve
+curl http://127.0.0.1:8080/config/login -H "x-goog-api-key: my-secret-key"
+```
+Open the returned `login_url`. If the browser cannot reach the proxy's loopback callback, submit the final redirect URL:
+```sh
+curl http://127.0.0.1:8080/config/login \
+  -H "x-goog-api-key: my-secret-key" -H "Content-Type: application/json" \
+  -d '{"url":"http://127.0.0.1:51121/oauth-callback?code=...&state=..."}'
+```
+Runtime login requires a configured `API_KEY`, no token environment overrides, and a writable private config directory. It can replace the active account without restarting; failed preparation leaves the old account usable. `/health` reports credential presence, while `/status/account` provides email/name and the provider-reported tier. See the [runtime API contract](docs/api.md#runtime-account-configuration) and [writable container setup](docs/deployment.md#runtime-login-in-a-container).
 
 ### 4. Test Generation
 ```sh
@@ -146,11 +156,8 @@ export OPENAI_BASE_URL="https://your-bifrost-domain/v1"
 export OPENAI_API_KEY="sk-bf-your-virtual-key"
 ```
 
-Then select any available model with your provider prefix:
-- `gemini/gemini-3.8-flash-tiered`
-- `gemini/gemini-3.5-flash-lite`
-- `gemini/claude-sonnet-4-6`
-- `gemini/claude-opus-4-6-thinking`
+Then select any available model with your provider prefix: `gemini/model-name`
+
 
 
 ## Monitoring Quotas

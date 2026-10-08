@@ -95,7 +95,7 @@ func (w *accessResponseWriter) Flush() { _ = w.FlushError() }
 // accessRoute uses stable route labels rather than logging user-controlled URLs.
 func accessRoute(r *http.Request) (string, string) {
 	switch r.URL.Path {
-	case "/health", "/models", "/status/limit", "/status/usage", "/v1beta/models":
+	case "/health", "/models", "/status/limit", "/status/usage", "/status/account", "/config/login", "/v1beta/models":
 		return r.URL.Path, ""
 	}
 	if strings.HasPrefix(r.URL.Path, "/v1beta/models/") {

@@ -1,0 +1,164 @@
+/*
+ * Antigravity Proxy illustration tokens.
+ * Shared by every docs/illustrations/*.html source. See DESIGN.md.
+ */
+
+@font-face {
+  font-family: "Google Sans";
+  src: url("../web/GoogleSans-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+}
+
+:root {
+  /* Neutrals */
+  --canvas: #FFFFFF;
+  --surface: #F8F9FA;
+  --surface-strong: #F1F3F4;
+  --outline: #DADCE0;
+  --divider: #E8EAED;
+  --ink: #202124;
+  --ink-secondary: #5F6368;
+  --ink-tertiary: #80868B;
+  --ink-disabled: #BDC1C6;
+
+  /* Brand fills: shapes, dots, bars, icons. Never body text. */
+  --blue: #4285F4;
+  --red: #EA4335;
+  --yellow: #FBBC04;
+  --green: #34A853;
+
+  /* Text-safe tones: >= 4.5:1 on white. */
+  --blue-ink: #1A73E8;
+  --red-ink: #D93025;
+  --yellow-ink: #B06000;
+  --green-ink: #188038;
+
+  /* Tonal containers: large tinted areas. */
+  --blue-container: #E8F0FE;
+  --red-container: #FCE8E6;
+  --yellow-container: #FEF7E0;
+  --green-container: #E6F4EA;
+
+  /* Signature: logo-mark sweep. Accent use only. */
+  --signature: linear-gradient(90deg, #4285F4 0%, #34A853 35%, #FBBC04 65%, #EA4335 100%);
+
+  /* Type scale: one weight, so hierarchy is size + color. */
+  --font: "Google Sans", sans-serif;
+  --display: 36px / 44px var(--font);
+  --title: 22px / 28px var(--font);
+  --subtitle: 17px / 24px var(--font);
+  --body: 15px / 22px var(--font);
+  --label: 13px / 16px var(--font);
+  --caption: 12px / 16px var(--font);
+  --stat: 44px / 48px var(--font);
+
+  /* Shape */
+  --radius-frame: 28px;
+  --radius-card: 16px;
+  --radius-chip: 8px;
+  --radius-pill: 999px;
+  --stroke: 1px;
+  --connector: 2px;
+
+  /* Spacing: 4px grid */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s6: 24px;
+  --s8: 32px;
+  --s12: 48px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: transparent;
+  print-color-adjust: exact;
+  -webkit-print-color-adjust: exact;
+}
+
+body {
+  font: var(--body);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "tnum" 1;
+}
+
+/* Outer frame: keeps the white illustration intentional on GitHub dark mode. */
+.frame {
+  position: relative;
+  width: 960px;
+  padding: var(--s12);
+  background: var(--canvas);
+  border: var(--stroke) solid var(--outline);
+  border-radius: var(--radius-frame);
+}
+
+.eyebrow {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  font: var(--label);
+  letter-spacing: 0.2px;
+  color: var(--blue-ink);
+}
+
+/* Four-segment brand stripe used beside eyebrows. */
+.stripe {
+  display: flex;
+  gap: 3px;
+}
+
+.stripe i {
+  width: 12px;
+  height: 4px;
+  border-radius: var(--radius-pill);
+}
+
+.stripe i:nth-child(1) { background: var(--blue); }
+.stripe i:nth-child(2) { background: var(--red); }
+.stripe i:nth-child(3) { background: var(--yellow); }
+.stripe i:nth-child(4) { background: var(--green); }
+
+.display {
+  margin: var(--s4) 0 0;
+  font: var(--display);
+  letter-spacing: -0.5px;
+}
+
+.lede {
+  max-width: 640px;
+  margin: var(--s3) 0 0;
+  font: var(--subtitle);
+  color: var(--ink-secondary);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 var(--s3);
+  border-radius: var(--radius-pill);
+  font: var(--caption);
+  letter-spacing: 0.2px;
+}
+
+.chip.blue { background: var(--blue-container); color: var(--blue-ink); }
+.chip.green { background: var(--green-container); color: var(--green-ink); }
+.chip.yellow { background: var(--yellow-container); color: var(--yellow-ink); }
+.chip.red { background: var(--red-container); color: var(--red-ink); }
+.chip.neutral { background: var(--surface-strong); color: var(--ink-secondary); }
+/* Chip sitting on a tonal container: white fill so it doesn't vanish. */
+.chip.on-tint { background: var(--canvas); }
+
+.icon {
+  display: block;
+  width: 24px;
+  height: 24px;
+}

@@ -33,6 +33,31 @@ docker run -d \
   antigravity-proxy
 ```
 
+### Runtime Login in a Container
+
+To configure or replace an account through `/config/login`, use a writable private config directory instead of the `readonly` config mount above. Keep the container root filesystem read-only, but mount configuration and history as writable persistent directories. Both must belong to the container UID (10001 by default, or the explicit `--user` UID), and existing `config.json` must be mode `0600`.
+
+```sh
+mkdir -p "$HOME/.config/antigravity-proxy" "$HOME/.local/share/antigravity-proxy"
+chmod 700 "$HOME/.config/antigravity-proxy"
+
+docker run -d \
+  --name antigravity-proxy \
+  --read-only \
+  --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  --user "$(id -u):$(id -g)" \
+  --mount type=bind,src="$HOME/.config/antigravity-proxy",dst=/home/app/.config/antigravity-proxy \
+  --mount type=bind,src="$HOME/.local/share/antigravity-proxy",dst=/home/app/.local/share/antigravity-proxy \
+  -p 127.0.0.1:8080:8080 \
+  -e API_KEY="your-secret-api-key" \
+  antigravity-proxy
+```
+
+Do not supply token environment overrides for runtime login. The server remains up without a Google account; protected generation and model requests return `503` until login commits. Fetch the authorization URL with an API-key header, then submit `code`/`state` or the full loopback redirect URL as described in the [API reference](api.md#runtime-account-configuration). A browser outside the container normally cannot reach its loopback callback, so use manual submission or a tunnel. Remote management requests require HTTPS or an encrypted tunnel.
+
+Account identity is persisted with credentials, and quota journals use hashed account namespaces. Preserve the entire history directory across restarts; old unlabelled journals are kept untouched.
+
 ### Running with Environment Variables
 
 If you prefer to manage credentials strictly through environment variables or secret managers:
@@ -92,6 +117,8 @@ networks:
 ```
 
 *Note: Pre-create `./data` with permissions matching UID 10001 (`chown -R 10001:10001 ./data`) or your host UID.*
+
+For runtime login with this Compose example, change the config volume to `./config:/home/app/.config/antigravity-proxy` (remove `:ro`) and give that directory the same private ownership as the data directory. `read_only: true` can remain enabled for the root filesystem.
 
 ---
 

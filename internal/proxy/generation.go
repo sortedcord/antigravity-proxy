@@ -48,6 +48,14 @@ func (p *Proxy) handleGenerateContent(w http.ResponseWriter, r *http.Request, mo
 		writeGeminiError(w, http.StatusServiceUnavailable, "generation canceled")
 		return
 	}
+	if !p.hasCredentials() {
+		if r.ProtoMajor == 1 {
+			w.Header().Set("Connection", "close")
+			_ = http.NewResponseController(w).SetReadDeadline(time.Now())
+		}
+		writeGeminiError(w, http.StatusServiceUnavailable, "Google authentication unavailable")
+		return
+	}
 	select {
 	case p.generationSlots <- struct{}{}:
 		defer func() { <-p.generationSlots }()

@@ -17,7 +17,6 @@ import (
 	"antigravity-proxy/internal/config"
 	"antigravity-proxy/internal/oauth"
 	"antigravity-proxy/internal/proxy"
-	"antigravity-proxy/internal/status"
 )
 
 func main() {
@@ -62,13 +61,13 @@ Environment:
 		log.Printf("No Google credential configured; run `antigravity-proxy login` or set ANTIGRAVITY_ACCESS_TOKEN")
 	}
 
-	if err := serve(cfg); err != nil {
+	if err := serve(cfg, path); err != nil {
 		log.Fatal(err)
 	}
 }
 
 // serve owns HTTP and quota-polling lifecycles so every exit closes history.
-func serve(cfg config.Config) (err error) {
+func serve(cfg config.Config, configPath string) (err error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	address := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
@@ -77,15 +76,13 @@ func serve(cfg config.Config) (err error) {
 		return fmt.Errorf("listen: %w", err)
 	}
 	defer listener.Close()
-	server := proxy.New(cfg)
-	quotaStatus := status.NewService(cfg, server.QuotaFetcher().Fetch)
-	server.StatusHandler = quotaStatus
-	if err := quotaStatus.Start(ctx); err != nil {
+	server, err := proxy.NewRuntime(ctx, cfg, configPath)
+	if err != nil {
 		return err
 	}
 	defer func() {
-		if closeErr := quotaStatus.Close(); closeErr != nil {
-			err = errors.Join(err, fmt.Errorf("close quota history: %w", closeErr))
+		if closeErr := server.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close account runtime: %w", closeErr))
 		}
 	}()
 	httpServer := &http.Server{

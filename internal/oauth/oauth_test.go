@@ -23,6 +23,19 @@ func clearOAuthEnvironment(t *testing.T) {
 	t.Helper()
 	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_ID", "")
 	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET", "")
+	for _, key := range []string{"ANTIGRAVITY_ACCESS_TOKEN", "ANTIGRAVITY_REFRESH_TOKEN"} {
+		value, existed := os.LookupEnv(key)
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if existed {
+				_ = os.Setenv(key, value)
+			} else {
+				_ = os.Unsetenv(key)
+			}
+		})
+	}
 }
 
 func syntheticPair(t *testing.T) (string, string) {
@@ -55,7 +68,7 @@ func TestLoginPersistsPairOnlyWithSuccessfulTokens(t *testing.T) {
 	id, secret := syntheticPair(t)
 	path := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.Config{Port: 9191, ProjectID: t.Name(), AccessToken: "obsolete", RefreshToken: "obsolete"}
-	if err := saveLoginTokens(path, Tokens{}, id, secret); err == nil {
+	if err := saveLoginTokens(path, Tokens{}, id, secret, testUserInfo()); err == nil {
 		t.Fatal("login accepted missing access token")
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -66,7 +79,7 @@ func TestLoginPersistsPairOnlyWithSuccessfulTokens(t *testing.T) {
 	}
 	for _, refresh := range []string{t.Name() + "-refresh", ""} {
 		tokens := Tokens{AccessToken: t.Name() + "-access", RefreshToken: refresh}
-		if err := saveLoginTokens(path, tokens, id, secret); err != nil {
+		if err := saveLoginTokens(path, tokens, id, secret, testUserInfo()); err != nil {
 			t.Fatal(err)
 		}
 		data, err := os.ReadFile(path)
@@ -79,6 +92,9 @@ func TestLoginPersistsPairOnlyWithSuccessfulTokens(t *testing.T) {
 		}
 		if saved.OAuthClientID != id || saved.OAuthClientSecret != secret || saved.RefreshToken != refresh || saved.Port != cfg.Port || saved.ProjectID != cfg.ProjectID {
 			t.Fatal("login did not persist the exact pair with tokens and existing settings")
+		}
+		if saved.AccountID != testUserInfo().ID || saved.AccountEmail != testUserInfo().Email || saved.AccountName != testUserInfo().Name {
+			t.Fatal("login did not persist the authenticated identity")
 		}
 		if (refresh == "" && saved.AccessToken != tokens.AccessToken) || (refresh != "" && saved.AccessToken != "") {
 			t.Fatal("login selected the wrong saved token")
@@ -225,6 +241,13 @@ func TestLoginCallbackPersistsPairForLaterRefresh(t *testing.T) {
 			t.Setenv("OAUTH_CALLBACK_PORT", strconv.Itoa(port))
 			var calls atomic.Int32
 			tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/oauth2/v2/userinfo" {
+					if r.Header.Get("Authorization") != "Bearer "+t.Name()+"-access" {
+						t.Error("profile request lost the exchanged access token")
+					}
+					_ = json.NewEncoder(w).Encode(testUserInfo())
+					return
+				}
 				calls.Add(1)
 				if err := r.ParseForm(); err != nil {
 					t.Error("invalid token request form")

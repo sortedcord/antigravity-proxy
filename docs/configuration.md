@@ -23,6 +23,9 @@ On Unix systems, this file must have owner-only permissions (`chmod 600`). The p
   "refreshToken": "",
   "oauthClientId": "",
   "oauthClientSecret": "",
+  "accountId": "",
+  "accountEmail": "",
+  "accountName": "",
   "projectId": "",
   "clientVersion": "1.15.8",
   "maxConcurrentGenerations": 2,
@@ -33,6 +36,12 @@ On Unix systems, this file must have owner-only permissions (`chmod 600`). The p
   "prodEndpoint": "https://cloudcode-pa.googleapis.com"
 }
 ```
+
+Login writes `accountId`, `accountEmail`, and `accountName` together with the credential set. Keep these managed fields paired with their tokens; runtime replacement updates them atomically and never persists listener defaults or environment overrides. Token environment variables, including explicit empty values, clear saved profile attribution in the effective configuration. Remove token overrides to use `/config/login`.
+
+`quotaHistoryPath` is the journal base name. The runtime derives an owner-only journal with a stable hashed Google-account namespace; relogin to the same account and restart retain that account's observations. Unattributed legacy journals stay untouched. Credentials without identity are resolved read-only; unresolved credential sets do not fetch quota or expose another account's journal.
+
+`/config/login` requires a configured `API_KEY` even on loopback, and its credential configuration directory must be writable. Static read-only configuration mounts remain supported for preconfigured deployments, but cannot persist runtime login.
 
 ---
 

@@ -10,6 +10,9 @@ Antigravity Proxy exposes a native Google Gemini `/v1beta` HTTP interface along 
 | `GET /models` | Raw Cloud Code `fetchAvailableModels` JSON catalog | Local `API_KEY` |
 | `GET /status/limit` | Latest persisted quota snapshot across model pools | Local `API_KEY` |
 | `GET /status/usage` | Historical quota observations with filtering & pagination | Local `API_KEY` |
+| `GET /status/account` | Authenticated Google account details (email, name, subscription tier) | Local `API_KEY` |
+| `GET /config/login` | Initiate runtime OAuth login; returns Google authorization URL | Local `API_KEY` |
+| `POST /config/login` | Complete runtime OAuth login with code/state or redirect URL | Local `API_KEY` |
 | `GET /v1beta/models` | Native Gemini model list with keyset pagination | Local `API_KEY` |
 | `GET /v1beta/models/{id}` | Native Gemini model details | Local `API_KEY` |
 | `POST /v1beta/models/{id}:generateContent` | Native Gemini content generation | Local `API_KEY` |
@@ -27,6 +30,10 @@ When `API_KEY` is set on the server, requests to protected routes must include t
 4. `Authorization: Bearer <API_KEY>`
 
 If no `API_KEY` is configured on the server, API key authentication is disabled for local loopback use. The local API key authenticates clients to the proxy; Google Cloud Code upstream authentication is handled securely by the proxy using its stored Google OAuth credentials.
+
+`/config/login` is an administration exception: the server must have a configured `API_KEY`, even on loopback. Without it, both login methods return `503`; a missing or incorrect request key returns `401`. Use headers rather than URL query parameters, and HTTPS or an encrypted tunnel for remote setup. The same key permits account replacement, so distribute it only to trusted administrators if management routes are reachable.
+
+The server may start without Google credentials. Model discovery and generation reject those requests locally with `503` before body reads, generation capacity acquisition, token refresh, project discovery, or Google calls. `/health` stays public and reports local credential presence, not proof that Google credentials remain valid.
 
 ---
 
@@ -230,4 +237,90 @@ curl --get "http://127.0.0.1:8080/status/usage" \
   --data-urlencode "pool=third_party" \
   --data-urlencode "window=weekly" \
   --data-urlencode "limit=10"
+```
+
+### `GET /status/account`
+
+Returns details about the configured Google account including email, display name, and active subscription tier. Fails fast with `503` if no account has been configured.
+
+**Example:**
+```sh
+curl http://127.0.0.1:8080/status/account \
+  -H "x-goog-api-key: $API_KEY"
+```
+
+**Response Format:**
+```json
+{
+  "credential_configured": true,
+  "email": "developer@example.com",
+  "name": "Example Developer",
+  "subscription": {
+    "id": "g1-pro-tier",
+    "display_name": "Google AI Pro",
+    "source_field": "paidTier"
+  },
+  "subscription_status": "known"
+}
+```
+
+The profile is bound to the active account snapshot. Subscription metadata prefers `paidTier`, then `currentTier`; the latter is an access tier, not independent proof of a paid billing plan. Missing provider tier metadata produces `subscription: null` and `subscription_status: "not_reported"`; lookup failures produce `"unavailable"` without hiding a known profile. No account onboarding is performed to display account details.
+
+Quota observations are stored in account-specific journals with hashed identity suffixes. Successful login saves account identity with credentials so restart reopens the same journal. Unlabelled legacy `usage.jsonl` is retained untouched, never attributed to another account. Environment token overrides discard saved profile attribution; read-only identity lookup resolves those credentials before account quota polling begins.
+
+---
+
+## Runtime Account Configuration
+
+### `GET /config/login`
+
+Initiates a runtime Google OAuth login session and returns the authorization URL.
+
+Login sessions use state validation and PKCE and expire after five minutes. Repeated GET requests reuse a pending attempt; completion already in progress returns `409`. Abandoned, failed, expired, and completed attempts release their callback listeners. Failed attempts are terminal: start a new GET instead of replaying a consumed code. Unsupported methods return `405`.
+
+**Example:**
+```sh
+curl http://127.0.0.1:8080/config/login \
+  -H "x-goog-api-key: $API_KEY"
+```
+
+**Response Format:**
+```json
+{
+  "login_url": "https://accounts.google.com/o/oauth2/v2/auth?...",
+  "expires_at": "2026-10-07T16:30:00Z"
+}
+```
+
+### `POST /config/login`
+
+Completes runtime Google OAuth login. When authenticating from a browser on a different machine, the user can submit the authorization code and state (or the full redirected URL) from the browser address bar.
+
+On the browser's machine, `127.0.0.1` refers to that machine, not a remote proxy or container. When the loopback redirect cannot connect, copy its URL from the address bar and submit it to the proxy. An SSH tunnel can instead deliver the callback automatically. POST exchanges and persists credentials on the proxy, then publishes a new complete account snapshot; the old account remains usable until this commit. Existing automatic token refresh is preserved.
+
+Use either `code` plus `state`, or the `url` field. Do not combine them. The JSON body is bounded to 64 KiB. Identity, history preparation, or credential-save failure before commit leaves the old account and saved credentials intact. Invalid state returns `400`; expired state `410`; replay or concurrent completion `409`; Google exchange/profile failures `502`; local preparation/save failures `500`.
+
+If file replacement succeeds but directory sync fails, POST returns `500` with `credential_configured: true` and `durability_uncertain: true`. The live account matches the replacement on disk; this is not an unchanged-account failure. The response contains no tokens or filesystem causes. Start a fresh login/save to confirm durability.
+
+**Payload Options:**
+```json
+{
+  "code": "4/0A...",
+  "state": "a1b2..."
+}
+```
+or with the full redirect URL:
+```json
+{
+  "url": "http://127.0.0.1:51121/oauth-callback?state=a1b2...&code=4/0A..."
+}
+```
+
+**Response Format:**
+```json
+{
+  "status": "configured",
+  "email": "developer@example.com",
+  "name": "Example Developer"
+}
 ```
