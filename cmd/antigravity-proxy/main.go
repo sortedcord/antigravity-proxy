@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -21,8 +21,15 @@ import (
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
-	if len(os.Args) > 1 && (os.Args[1] == "help" || os.Args[1] == "-h" || os.Args[1] == "--help") {
-		fmt.Printf(`Antigravity Proxy
+	if err := run(os.Args[1:], os.Stdout); err != nil {
+		slog.Error("command failed", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run(args []string, output io.Writer) error {
+	if len(args) > 0 && (args[0] == "help" || args[0] == "-h" || args[0] == "--help") {
+		fmt.Fprintf(output, `Antigravity Proxy
 
 Usage:
   antigravity-proxy [serve]
@@ -39,31 +46,25 @@ Environment:
   ANTIGRAVITY_QUOTA_HISTORY_MAX_SAMPLES (default %d)
 `, config.DefaultClientVersion, config.DefaultMaxConcurrentGenerations,
 			config.DefaultQuotaPollIntervalSeconds, config.DefaultQuotaHistoryMaxSamples)
-		return
+		return nil
 	}
 	cfg, path, err := config.Load()
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
+	if len(args) > 0 {
+		switch args[0] {
 		case "login":
-			if err := oauth.Login(cfg, path); err != nil {
-				log.Fatal(err)
-			}
-			return
+			return oauth.Login(cfg, path)
 		case "serve":
 		default:
-			log.Fatalf("unknown command %q (use --help)", os.Args[1])
+			return fmt.Errorf("unknown command %q (use --help)", args[0])
 		}
 	}
 	if cfg.AccessToken == "" && cfg.RefreshToken == "" {
-		log.Printf("No Google credential configured; run `antigravity-proxy login` or set ANTIGRAVITY_ACCESS_TOKEN")
+		slog.Info("No Google credential configured; run `antigravity-proxy login` or set ANTIGRAVITY_ACCESS_TOKEN")
 	}
-
-	if err := serve(cfg, path); err != nil {
-		log.Fatal(err)
-	}
+	return serve(cfg, path)
 }
 
 // serve owns HTTP and quota-polling lifecycles so every exit closes history.
@@ -91,8 +92,8 @@ func serve(cfg config.Config, configPath string) (err error) {
 		IdleTimeout:       90 * time.Second,
 		// Keep write deadlines disabled because upstream requests can take several minutes.
 	}
-	log.Printf("Antigravity Proxy listening on http://%s", address)
-	log.Printf("Quota polling every %d seconds; history: %s", cfg.QuotaPollIntervalSeconds, cfg.QuotaHistoryPath)
+	slog.Info("Antigravity Proxy listening", "address", "http://"+address)
+	slog.Info("Quota polling configured", "interval_seconds", cfg.QuotaPollIntervalSeconds, "history", cfg.QuotaHistoryPath)
 	served := make(chan error, 1)
 	go func() { served <- httpServer.Serve(listener) }()
 	select {

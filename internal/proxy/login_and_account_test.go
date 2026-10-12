@@ -699,6 +699,9 @@ func TestRuntimeIdentityPromotionDoesNotExtendExpiredCachedToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireNativeAccount(t, r, "token-b-renewed", "project-b")
+	// Startup polls may skip a refresh owned by the native request. Request a
+	// new poll after it finishes instead of waiting for the hourly schedule.
+	r.active.Load().status.TriggerPoll()
 	waitQuota(t, r, .75)
 	if provider.refreshCalls.Load() != before+1 {
 		t.Fatal("expired startup token did not refresh exactly once after promotion")

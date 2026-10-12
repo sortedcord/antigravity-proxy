@@ -305,6 +305,8 @@ func TestLoginCallbackPersistsPairForLaterRefresh(t *testing.T) {
 				t.Fatal("callback redirect does not match the IPv4 loopback listener")
 			}
 			callbackClient := &http.Client{Transport: original, Timeout: 5 * time.Second}
+			// Drain responses so connection replacement does not race the CLI's
+			// graceful shutdown and exhaust the test's completion deadline.
 			for _, stray := range []struct {
 				method string
 				query  url.Values
@@ -322,6 +324,10 @@ func TestLoginCallbackPersistsPairForLaterRefresh(t *testing.T) {
 				response, err := callbackClient.Do(request)
 				if err != nil {
 					t.Fatal("could not deliver stray callback")
+				}
+				if _, err := io.Copy(io.Discard, response.Body); err != nil {
+					response.Body.Close()
+					t.Fatal("could not read stray callback response", err)
 				}
 				response.Body.Close()
 				if response.StatusCode != stray.status {
@@ -341,6 +347,10 @@ func TestLoginCallbackPersistsPairForLaterRefresh(t *testing.T) {
 			response, err := callbackClient.Get(callbackURL.String())
 			if err != nil {
 				t.Fatal("could not deliver loopback callback")
+			}
+			if _, err := io.Copy(io.Discard, response.Body); err != nil {
+				response.Body.Close()
+				t.Fatal("could not read callback response", err)
 			}
 			response.Body.Close()
 			wantStatus := http.StatusOK

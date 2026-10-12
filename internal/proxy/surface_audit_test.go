@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -105,6 +106,30 @@ func TestGenerationCapacityRejectsBeforeReadAndReleasesOnCancel(t *testing.T) {
 	}
 	contexts[1]()
 	awaitSurface(t, done[1])
+}
+
+func TestGenerationWithoutCredentialsRejectsBeforeBodyRead(t *testing.T) {
+	p := New(config.Config{})
+	for _, protocol := range []int{1, 2} {
+		t.Run(strconv.Itoa(protocol), func(t *testing.T) {
+			body := &unreadGenerationBody{}
+			request := httptest.NewRequest(http.MethodPost, "/v1beta/models/model:generateContent", nil)
+			request.ProtoMajor = protocol
+			request.Body = body
+			response := httptest.NewRecorder()
+			p.ServeHTTP(response, request)
+			if response.Code != http.StatusServiceUnavailable || body.reads != 0 || len(p.generationSlots) != 0 {
+				t.Fatalf("rejection = %d, body reads = %d, occupied slots = %d", response.Code, body.reads, len(p.generationSlots))
+			}
+			wantConnection := ""
+			if protocol == 1 {
+				wantConnection = "close"
+			}
+			if response.Header().Get("Connection") != wantConnection {
+				t.Fatalf("Connection header = %q; want %q", response.Header().Get("Connection"), wantConnection)
+			}
+		})
+	}
 }
 
 func TestConfiguredGenerationCapacity(t *testing.T) {

@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 )
 
 const maxGenerationRequestSize = 50 << 20
@@ -33,7 +32,13 @@ func (payload generationEnvelope) requestBody() (func() io.Reader, int64, error)
 		UserAgent   string `json:"userAgent"`
 		RequestType string `json:"requestType"`
 		RequestID   string `json:"requestId"`
-	}{payload.Project, payload.Model, payload.UserAgent, payload.RequestType, payload.RequestID})
+	}{
+		Project:     payload.Project,
+		Model:       payload.Model,
+		UserAgent:   payload.UserAgent,
+		RequestType: payload.RequestType,
+		RequestID:   payload.RequestID,
+	})
 	if err != nil {
 		return nil, 0, err
 	}
@@ -49,10 +54,7 @@ func (p *Proxy) handleGenerateContent(w http.ResponseWriter, r *http.Request, mo
 		return
 	}
 	if !p.hasCredentials() {
-		if r.ProtoMajor == 1 {
-			w.Header().Set("Connection", "close")
-			_ = http.NewResponseController(w).SetReadDeadline(time.Now())
-		}
+		rejectUnreadBody(w, r)
 		writeGeminiError(w, http.StatusServiceUnavailable, "Google authentication unavailable")
 		return
 	}
@@ -60,13 +62,7 @@ func (p *Proxy) handleGenerateContent(w http.ResponseWriter, r *http.Request, mo
 	case p.generationSlots <- struct{}{}:
 		defer func() { <-p.generationSlots }()
 	default:
-		if r.ProtoMajor == 1 {
-			// HTTP/1 normally drains small unread request bodies before responding.
-			// Close this connection instead, and prevent its final Body.Close from
-			// waiting for bytes a saturated caller may never send.
-			w.Header().Set("Connection", "close")
-			_ = http.NewResponseController(w).SetReadDeadline(time.Now())
-		}
+		rejectUnreadBody(w, r)
 		w.Header().Set("Retry-After", "1")
 		writeGeminiError(w, http.StatusTooManyRequests, "generation capacity exhausted")
 		return

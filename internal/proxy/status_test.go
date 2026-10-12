@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -40,6 +41,32 @@ func TestStatusEndpointsRequireLocalKeyAndGet(t *testing.T) {
 		proxy.ServeHTTP(recorder, request)
 		if recorder.Code != http.StatusMethodNotAllowed || recorder.Header().Get("Allow") != http.MethodGet {
 			t.Fatalf("%s POST response = %d %v", path, recorder.Code, recorder.Header())
+		}
+	}
+}
+
+func TestUnwiredStatusEndpointsRemainAuthenticated(t *testing.T) {
+	p := New(config.Config{APIKey: "local-key"})
+	for _, path := range []string{"/status/limit", "/status/usage"} {
+		for _, authenticated := range []bool{false, true} {
+			t.Run(path+"/authenticated="+fmt.Sprint(authenticated), func(t *testing.T) {
+				request := httptest.NewRequest(http.MethodGet, path, nil)
+				if authenticated {
+					request.Header.Set("x-goog-api-key", "local-key")
+				}
+				response := httptest.NewRecorder()
+				p.ServeHTTP(response, request)
+				want := http.StatusUnauthorized
+				if authenticated {
+					want = http.StatusServiceUnavailable
+					if response.Header().Get("Cache-Control") != "no-store" {
+						t.Fatal("unavailable status response can be cached")
+					}
+				}
+				if response.Code != want || !json.Valid(response.Body.Bytes()) {
+					t.Fatalf("response = %d %s; want %d and JSON", response.Code, response.Body.String(), want)
+				}
+			})
 		}
 	}
 }

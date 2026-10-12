@@ -1,5 +1,5 @@
 // Package oauth handles Google authorization and token exchange using configured
-// or safely extracted official CLI OAuth client credentials.
+// or official consumer OAuth client credentials.
 package oauth
 
 import (

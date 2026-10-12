@@ -125,6 +125,9 @@ func Load() (Config, string, error) {
 		}
 		cfg.Port = port
 	}
+	if cfg.Port < 1 || cfg.Port > 65535 {
+		return Config{}, "", fmt.Errorf("port must be an integer from 1 to 65535")
+	}
 	envString("API_KEY", &cfg.APIKey)
 	cfg.APIKey = strings.TrimSpace(cfg.APIKey)
 	if err := validateListenAddress(cfg.Host, cfg.APIKey); err != nil {
@@ -315,7 +318,6 @@ func readConfig(path string, cfg *Config) ([]byte, error) {
 // silently overwrite aliases, and a later map serialization can change the winner.
 func rejectDuplicateConfigFields(data []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
 	if _, err := decoder.Token(); err != nil {
 		return err
 	}
@@ -332,22 +334,10 @@ func rejectDuplicateConfigFields(data []byte) error {
 			}
 		}
 		keys = append(keys, key)
-		// Consume one value without retaining it, including any nested containers.
-		depth := 0
-		for {
-			token, err := decoder.Token()
-			if err != nil {
-				return err
-			}
-			switch token {
-			case json.Delim('{'), json.Delim('['):
-				depth++
-			case json.Delim('}'), json.Delim(']'):
-				depth--
-			}
-			if depth == 0 {
-				break
-			}
+		// Let encoding/json consume the complete value, including nested containers.
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return err
 		}
 	}
 	_, err := decoder.Token()
@@ -369,29 +359,28 @@ func UpdateCredentials(path string, creds Credentials) error {
 			return fmt.Errorf("read saved credentials: %w", err)
 		}
 	}
-	// encoding/json matches Config keys case-insensitively. Remove every alias
-	// before inserting canonical keys so an old static token cannot survive login.
-	for key := range fields {
-		if strings.EqualFold(key, "accessToken") || strings.EqualFold(key, "refreshToken") ||
-			strings.EqualFold(key, "oauthClientId") || strings.EqualFold(key, "oauthClientSecret") ||
-			strings.EqualFold(key, "accountId") || strings.EqualFold(key, "accountEmail") ||
-			strings.EqualFold(key, "accountName") {
-			delete(fields, key)
-		}
-	}
-	for key, value := range map[string]string{
-		"accessToken":       creds.AccessToken,
-		"refreshToken":      creds.RefreshToken,
-		"oauthClientId":     creds.OAuthClientID,
-		"oauthClientSecret": creds.OAuthClientSecret,
-		"accountId":         creds.AccountID,
-		"accountEmail":      creds.AccountEmail,
-		"accountName":       creds.AccountName,
+	for _, field := range []struct {
+		key   string
+		value string
+	}{
+		{key: "accessToken", value: creds.AccessToken},
+		{key: "refreshToken", value: creds.RefreshToken},
+		{key: "oauthClientId", value: creds.OAuthClientID},
+		{key: "oauthClientSecret", value: creds.OAuthClientSecret},
+		{key: "accountId", value: creds.AccountID},
+		{key: "accountEmail", value: creds.AccountEmail},
+		{key: "accountName", value: creds.AccountName},
 	} {
-		if value == "" {
-			continue
+		// encoding/json matches Config keys case-insensitively. Remove every
+		// alias, even for empty replacements, so obsolete credentials cannot survive.
+		for key := range fields {
+			if strings.EqualFold(key, field.key) {
+				delete(fields, key)
+			}
 		}
-		fields[key], _ = json.Marshal(value)
+		if field.value != "" {
+			fields[field.key], _ = json.Marshal(field.value)
+		}
 	}
 	data, err = json.MarshalIndent(fields, "", "  ")
 	if err != nil {

@@ -35,6 +35,12 @@ func (p *Proxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		if !p.authorized(w, r) {
 			return
 		}
+		if p.StatusHandler == nil {
+			rejectUnreadBody(w, r)
+			w.Header().Set("Cache-Control", "no-store")
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "quota status is not configured"})
+			return
+		}
 		p.StatusHandler.ServeHTTP(w, r)
 	case r.URL.Path == "/status/account":
 		if !p.authorized(w, r) {
@@ -144,7 +150,6 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) handleStatusAccount(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Cache-Control", "no-store")
 	if !p.hasCredentials() {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Google authentication unavailable"})
 		return
