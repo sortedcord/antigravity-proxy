@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 )
@@ -78,12 +77,14 @@ func (w *accessResponseWriter) WriteHeader(status int) {
 	w.status = status
 	w.ResponseWriter.WriteHeader(status)
 }
+
 func (w *accessResponseWriter) Write(body []byte) (int, error) {
 	if w.status == 0 {
 		w.WriteHeader(http.StatusOK)
 	}
 	return w.ResponseWriter.Write(body)
 }
+
 func (w *accessResponseWriter) FlushError() error {
 	if w.status == 0 {
 		w.WriteHeader(http.StatusOK)
@@ -93,30 +94,7 @@ func (w *accessResponseWriter) FlushError() error {
 func (w *accessResponseWriter) Flush() { _ = w.FlushError() }
 
 // accessRoute uses stable route labels rather than logging user-controlled URLs.
-func accessRoute(r *http.Request) (string, string) {
-	switch r.URL.Path {
-	case "/health", "/models", "/status/limit", "/status/usage", "/status/account", "/config/login", "/v1beta/models":
-		return r.URL.Path, ""
-	}
-	if strings.HasPrefix(r.URL.Path, "/v1beta/models/") {
-		model, action, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/v1beta/models/"), ":")
-		if len(model) > 128 || model == "" {
-			return "unmatched", ""
-		}
-		for _, c := range model {
-			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.') {
-				return "unmatched", ""
-			}
-		}
-		switch action {
-		case "":
-			return "/v1beta/models/{model}", model
-		case "generateContent", "streamGenerateContent":
-			return "/v1beta/models/{model}:" + action, model
-		}
-	}
-	return "unmatched", ""
-}
+func accessRoute(r *http.Request) (string, string) { return resolveRoute(r.URL.Path).accessLabel() }
 
 func (p *Proxy) serveWithAccessLog(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()

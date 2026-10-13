@@ -18,7 +18,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"antigravity-proxy/internal/config"
 )
@@ -58,11 +57,11 @@ type Tokens struct {
 
 func listenOAuthCallbackPort() (net.Listener, int, error) {
 	ports := []int{51121, 51122, 51123, 51124, 51125, 51126}
-	if configured := os.Getenv("OAUTH_CALLBACK_PORT"); configured != "" {
-		port, err := strconv.Atoi(configured)
-		if err != nil || port < 1 || port > 65535 {
-			return nil, 0, errors.New("OAUTH_CALLBACK_PORT must be an integer from 1 to 65535")
-		}
+	port, err := config.OAuthCallbackPort()
+	if err != nil {
+		return nil, 0, err
+	}
+	if port != 0 {
 		ports = append([]int{port}, ports...)
 	}
 	seen := make(map[int]bool, len(ports))
@@ -91,128 +90,72 @@ func Login(cfg config.Config, path string) error {
 }
 
 func login(cfg config.Config, path string, output io.Writer) error {
-	discoveryCtx, cancelDiscovery := context.WithTimeout(context.Background(), 30*time.Second)
-	clientID, clientSecret, err := resolveLoginCredentials(discoveryCtx)
-	cancelDiscovery()
+	return loginWithClient(cfg, path, output, nil)
+}
+
+func loginWithClient(cfg config.Config, path string, output io.Writer, client *http.Client) error {
+	manager := NewSessionManagerWithClient(client, func(ctx context.Context, tokens Tokens, id, secret string, user UserInfo) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := saveLoginTokens(path, tokens, id, secret, user); err != nil {
+			return err
+		}
+		if tokens.RefreshToken == "" {
+			fmt.Fprintln(output, "Warning: Google did not return a refresh token; the saved access token expires.")
+		}
+		fmt.Fprintf(output, "Authorization saved to %s\n", path)
+		return nil
+	})
+	manager.cli = true
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), sessionLifetime)
+	defer cancel()
+	address, _, err := manager.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	if cfg.OAuthClientID != "" && cfg.OAuthClientID != clientID {
+	manager.mu.Lock()
+	session := manager.active
+	manager.mu.Unlock()
+	if cfg.OAuthClientID != "" && cfg.OAuthClientID != session.clientID {
 		fmt.Fprintln(output, "Authorizing with the consumer OAuth client; existing credentials remain unchanged until login succeeds.")
 	}
-	listener, callbackPort, err := listenOAuthCallbackPort()
-	if err != nil {
-		return err
-	}
-	defer listener.Close()
-	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/oauth-callback", callbackPort)
-
-	authReq, err := buildAuthorizationRequest(clientID, redirectURI)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(output, "Open this URL to authorize Antigravity Proxy:\n\n%s\n\nWaiting for the local callback on port %d...\n", authReq.authURL, callbackPort)
-
-	type callback struct {
-		code string
-		err  error
-	}
-	result := make(chan callback, 1)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/oauth-callback", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		if received := r.URL.Query().Get("state"); received != authReq.state {
-			http.Error(w, "OAuth state mismatch", http.StatusBadRequest)
-			return
-		}
-		if oauthErr := r.URL.Query().Get("error"); oauthErr != "" {
-			http.Error(w, "Authorization failed. You may close this tab.", http.StatusBadRequest)
-			select {
-			case result <- callback{err: errors.New("Google authorization failed")}:
-			default:
-			}
-			return
-		}
-		code := r.URL.Query().Get("code")
-		if code == "" {
-			http.Error(w, "missing authorization code", http.StatusBadRequest)
-			return
-		}
-		_, _ = io.WriteString(w, "Authorization complete. You may close this tab and return to the terminal.\n")
-		select {
-		case result <- callback{code: code}:
-		default:
-		}
-	})
-	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- server.Serve(listener) }()
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			_ = server.Close()
-		}
-	}()
-
-	var received callback
+	fmt.Fprintf(output, "Open this URL to authorize Antigravity Proxy:\n\n%s\n\nWaiting for the local callback...\n", address)
 	select {
-	case received = <-result:
-	case err := <-serveErr:
-		return fmt.Errorf("OAuth callback server stopped: %w", err)
-	case <-time.After(5 * time.Minute):
+	case <-session.done:
+		return session.result
+	case <-ctx.Done():
 		return errors.New("OAuth login timed out after 5 minutes")
 	}
-	if received.err != nil {
-		return received.err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	tokens, err := exchangeOAuthCode(ctx, received.code, authReq.verifier, redirectURI, clientID, clientSecret)
-	if err != nil {
-		return err
-	}
-	user, err := FetchUserInfo(ctx, tokens.AccessToken)
-	if err != nil {
-		return err
-	}
-	if err := saveLoginTokens(path, tokens, clientID, clientSecret, user); err != nil {
-		return err
-	}
-	if tokens.RefreshToken == "" {
-		fmt.Fprintln(os.Stderr, "Warning: Google did not return a refresh token; the saved access token expires.")
-	}
-	fmt.Fprintf(output, "Authorization saved to %s\n", path)
-	return nil
 }
 
 func saveLoginTokens(path string, tokens Tokens, clientID, clientSecret string, user UserInfo) error {
-	if strings.TrimSpace(tokens.AccessToken) == "" {
-		return errors.New("Google returned no access token")
-	}
-	if err := validateUserInfo(user); err != nil {
+	credentials, err := LoginCredentials(tokens, clientID, clientSecret, user)
+	if err != nil {
 		return err
 	}
-	accessToken := ""
-	if tokens.RefreshToken == "" {
-		accessToken = tokens.AccessToken
-	}
-	return config.UpdateCredentials(path, config.Credentials{
-		AccessToken: accessToken, RefreshToken: tokens.RefreshToken,
-		OAuthClientID: clientID, OAuthClientSecret: clientSecret,
-		AccountID: user.ID, AccountEmail: user.Email, AccountName: user.Name,
-	})
+	return config.UpdateCredentials(path, credentials)
 }
 
-func exchangeOAuthCode(ctx context.Context, code, verifier, redirectURI, clientID, clientSecret string) (Tokens, error) {
-	return exchangeOAuthCodeWithClient(ctx, &http.Client{Timeout: 30 * time.Second}, code, verifier, redirectURI, clientID, clientSecret)
+// LoginCredentials constructs one validated replacement set for CLI persistence
+// and runtime activation. Refreshable credentials never save an expiring static
+// access token that would take precedence over their refresh token.
+func LoginCredentials(tokens Tokens, clientID, clientSecret string, user UserInfo) (config.Credentials, error) {
+	if strings.TrimSpace(tokens.AccessToken) == "" {
+		return config.Credentials{}, errors.New("Google returned no access token")
+	}
+	if err := validateUserInfo(user); err != nil {
+		return config.Credentials{}, err
+	}
+	credentials := config.Credentials{
+		RefreshToken: tokens.RefreshToken, OAuthClientID: clientID, OAuthClientSecret: clientSecret,
+		AccountID: user.ID, AccountEmail: user.Email, AccountName: user.Name,
+	}
+	if tokens.RefreshToken == "" {
+		credentials.AccessToken = tokens.AccessToken
+	}
+	return credentials, nil
 }
 
 func exchangeOAuthCodeWithClient(ctx context.Context, client *http.Client, code, verifier, redirectURI, clientID, clientSecret string) (Tokens, error) {
@@ -224,31 +167,13 @@ func exchangeOAuthCodeWithClient(ctx context.Context, client *http.Client, code,
 		"grant_type":    {"authorization_code"},
 		"redirect_uri":  {redirectURI},
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, oauthTokenURL, strings.NewReader(form.Encode()))
-	if err != nil {
-		return Tokens{}, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := client.Do(req)
-	if err != nil {
-		return Tokens{}, errors.New("exchange OAuth code: token endpoint request failed")
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return Tokens{}, fmt.Errorf("exchange OAuth code: Google returned HTTP %d (%s)", resp.StatusCode, http.StatusText(resp.StatusCode))
-	}
-	var tokens Tokens
-	if err := json.NewDecoder(resp.Body).Decode(&tokens); err != nil {
-		return Tokens{}, errors.New("decode OAuth token response: invalid JSON response")
-	}
-	return tokens, nil
+	return postTokenForm(ctx, client, form, "exchange OAuth code", "decode OAuth token response")
 }
 
 type authRequestParams struct {
-	state     string
-	verifier  string
-	challenge string
-	authURL   string
+	state    string
+	verifier string
+	authURL  string
 }
 
 func buildAuthorizationRequest(clientID, redirectURI string) (authRequestParams, error) {
@@ -277,23 +202,22 @@ func buildAuthorizationRequest(clientID, redirectURI string) (authRequestParams,
 		"state":                 {state},
 	}
 	return authRequestParams{
-		state:     state,
-		verifier:  verifier,
-		challenge: challenge,
-		authURL:   fmt.Sprintf("%s?%s", oauthAuthURL, query.Encode()),
+		state:    state,
+		verifier: verifier,
+		authURL:  fmt.Sprintf("%s?%s", oauthAuthURL, query.Encode()),
 	}, nil
 }
 
 // Refresh exchanges cfg.RefreshToken using only its saved or environment client
 // pair. It never saves tokens.
 func Refresh(ctx context.Context, cfg config.Config) (Tokens, error) {
-	return RefreshWithClient(ctx, cfg, &http.Client{Timeout: 30 * time.Second})
+	return RefreshWithClient(ctx, cfg, &http.Client{Timeout: DefaultHTTPTimeout})
 }
 
 // RefreshWithClient uses the supplied OAuth client without mutating global transports.
 func RefreshWithClient(ctx context.Context, cfg config.Config, client *http.Client) (Tokens, error) {
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		client = &http.Client{Timeout: DefaultHTTPTimeout}
 	}
 	clientID, clientSecret, err := oauthClientCredentials(cfg)
 	if err != nil {
@@ -305,6 +229,13 @@ func RefreshWithClient(ctx context.Context, cfg config.Config, client *http.Clie
 		"refresh_token": {cfg.RefreshToken},
 		"grant_type":    {"refresh_token"},
 	}
+	return postTokenForm(ctx, client, form, "refresh Google OAuth token", "decode Google OAuth refresh response")
+}
+
+func postTokenForm(ctx context.Context, client *http.Client, form url.Values, operation, decoding string) (Tokens, error) {
+	if client == nil {
+		client = &http.Client{Timeout: DefaultHTTPTimeout}
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, oauthTokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return Tokens{}, err
@@ -312,15 +243,15 @@ func RefreshWithClient(ctx context.Context, cfg config.Config, client *http.Clie
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := client.Do(req)
 	if err != nil {
-		return Tokens{}, errors.New("refresh Google OAuth token: token endpoint request failed")
+		return Tokens{}, fmt.Errorf("%s: token endpoint request failed", operation)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return Tokens{}, fmt.Errorf("refresh Google OAuth token: Google returned HTTP %d (%s)", resp.StatusCode, http.StatusText(resp.StatusCode))
+		return Tokens{}, fmt.Errorf("%s: Google returned HTTP %d (%s)", operation, resp.StatusCode, http.StatusText(resp.StatusCode))
 	}
 	var tokens Tokens
-	if err := json.NewDecoder(resp.Body).Decode(&tokens); err != nil {
-		return Tokens{}, errors.New("decode Google OAuth refresh response: invalid JSON response")
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&tokens); err != nil {
+		return Tokens{}, fmt.Errorf("%s: invalid JSON response", decoding)
 	}
 	return tokens, nil
 }

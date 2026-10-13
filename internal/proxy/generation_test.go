@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -506,5 +508,227 @@ func TestGenerationSSECompletionProofHTTPRuntime(t *testing.T) {
 				t.Fatalf("usage moved ahead of terminal event: %s", body)
 			}
 		})
+	}
+}
+
+type unreadGenerationBody struct{ reads int }
+
+func (b *unreadGenerationBody) Read([]byte) (int, error) { b.reads++; panic("generation body read") }
+func (b *unreadGenerationBody) Close() error             { return nil }
+
+func TestGenerationCapacityRejectsBeforeReadAndReleasesOnCancel(t *testing.T) {
+	entered := make(chan struct{}, 4)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		entered <- struct{}{}
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+	p := generationTestProxy(upstream.URL)
+	contexts := make([]context.CancelFunc, 2)
+	done := make([]chan struct{}, 2)
+	for i := range 2 {
+		ctx, cancel := context.WithCancel(context.Background())
+		contexts[i] = cancel
+		defer cancel()
+		done[i] = make(chan struct{})
+		go func(i int) {
+			defer close(done[i])
+			p.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1beta/models/model:generateContent", strings.NewReader(`{}`)).WithContext(ctx))
+		}(i)
+		awaitSurface(t, entered)
+	}
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+	conn, err := net.Dial("tcp", proxyServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	// Keep every slot busy and withhold a body smaller than net/http's 256 KiB
+	// automatic drain threshold. The response must not wait for body bytes.
+	_, err = io.WriteString(conn, "POST /v1beta/models/model:generateContent HTTP/1.1\r\nHost: proxy\r\nContent-Length: 131072\r\nContent-Type: application/json\r\n\r\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(conn)
+	rejected, err := http.ReadResponse(reader, &http.Request{Method: http.MethodPost})
+	if err != nil {
+		t.Fatalf("saturated HTTP/1 response waited for withheld body: %v", err)
+	}
+	rejectedBody, err := io.ReadAll(rejected.Body)
+	_ = rejected.Body.Close()
+	if err != nil || rejected.StatusCode != 429 || rejected.Header.Get("Retry-After") != "1" || !rejected.Close {
+		t.Fatalf("saturation = %d %v body=%s err=%v", rejected.StatusCode, rejected.Header, rejectedBody, err)
+	}
+	if _, err := reader.ReadByte(); err != io.EOF {
+		t.Fatalf("saturated connection was not promptly closed: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1beta/models/model:generateContent", nil)
+	request.Body = &unreadGenerationBody{}
+	contexts[0]()
+	awaitSurface(t, done[0])
+	// A panic after admission must release the newly available slot too.
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("expected body panic")
+			}
+		}()
+		p.ServeHTTP(httptest.NewRecorder(), request)
+	}()
+	invalid := httptest.NewRecorder()
+	p.ServeHTTP(invalid, httptest.NewRequest(http.MethodPost, "/v1beta/models/model:generateContent", strings.NewReader(`[]`)))
+	if invalid.Code != 400 {
+		t.Fatalf("slot was not released after panic: %d", invalid.Code)
+	}
+	contexts[1]()
+	awaitSurface(t, done[1])
+}
+
+func TestGenerationWithoutCredentialsRejectsBeforeBodyRead(t *testing.T) {
+	p := New(config.Config{})
+	for _, protocol := range []int{1, 2} {
+		t.Run(strconv.Itoa(protocol), func(t *testing.T) {
+			body := &unreadGenerationBody{}
+			request := httptest.NewRequest(http.MethodPost, "/v1beta/models/model:generateContent", nil)
+			request.ProtoMajor = protocol
+			request.Body = body
+			response := httptest.NewRecorder()
+			p.ServeHTTP(response, request)
+			if response.Code != http.StatusServiceUnavailable || body.reads != 0 || len(p.generationSlots) != 0 {
+				t.Fatalf("rejection = %d, body reads = %d, occupied slots = %d", response.Code, body.reads, len(p.generationSlots))
+			}
+			wantConnection := ""
+			if protocol == 1 {
+				wantConnection = "close"
+			}
+			if response.Header().Get("Connection") != wantConnection {
+				t.Fatalf("Connection header = %q; want %q", response.Header().Get("Connection"), wantConnection)
+			}
+		})
+	}
+}
+
+func TestConfiguredGenerationCapacity(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		entered <- struct{}{}
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+	p := New(config.Config{AccessToken: "token", ProjectID: "project", DailyEndpoint: upstream.URL, ProdEndpoint: upstream.URL, MaxConcurrentGenerations: 1})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1beta/models/model:generateContent", strings.NewReader(`{}`)).WithContext(ctx))
+	}()
+	awaitSurface(t, entered)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1beta/models/model:generateContent", strings.NewReader(`{}`)))
+	if w.Code != 429 {
+		t.Fatalf("configured bound = %d", w.Code)
+	}
+	cancel()
+	awaitSurface(t, done)
+}
+
+func TestGenerationRawBodyPreservationAndSchemaSpans(t *testing.T) {
+	original := []byte(`{"contents":[{"parts":[{"inlineData":{"data":"opaque\\\"signature"},"thoughtSignature":"raw==","number":9007199254740993}]}],"generationConfig":{"temperature":0.1234567890123456789},"future":{"nested":[{},"]}"]}}`)
+	got, err := adaptGenerationBody(original)
+	if err != nil || !bytes.Equal(got, original) {
+		t.Fatalf("raw request changed: %s %v", got, err)
+	}
+	for _, body := range []string{
+		`{"contents":[{"text":"generationConfig: { fake }"}],"generationConfig":{"responseJsonSchema":{"type":"object","properties":{"n":{"const":9007199254740993}}},"temperature":0.1234567890123456789}}`,
+		`{"generationConfig":false,"generation\u0043onfig":{"responseJsonSchema":{"type":"object"}},"contents":[{"thoughtSignature":"opaque=="}]}`,
+	} {
+		adapted, err := adaptGenerationBody([]byte(body))
+		if err != nil || strings.Contains(string(adapted), "responseJsonSchema") || !strings.Contains(string(adapted), "responseSchema") {
+			t.Fatalf("schema span adaptation = %s %v", adapted, err)
+		}
+		for _, marker := range []string{"9007199254740993", "0.1234567890123456789", "opaque=="} {
+			if strings.Contains(body, marker) && !strings.Contains(string(adapted), marker) {
+				t.Fatalf("lost raw marker %s", marker)
+			}
+		}
+	}
+}
+
+func TestGenerationEnvelopePreservesRawRequestAcrossRedirectAndFallback(t *testing.T) {
+	const original = `{
+		"contents": [{"parts": [{"thoughtSignature":"opaque\\\"+/==<raw>","number":9007199254740993}]}],
+		"generationConfig": {"temperature":0.1234567890123456789},
+		"future": {"scientific":1e+09,"escaped":"\u0061"}
+	}`
+	bodies := make(chan []byte, 3)
+	capture := func(w http.ResponseWriter, r *http.Request) bool {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read upstream body: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return false
+		}
+		if r.Method != http.MethodPost || r.ContentLength != int64(len(body)) || len(r.TransferEncoding) != 0 {
+			t.Errorf("upstream framing: method=%s length=%d actual=%d transfer=%v", r.Method, r.ContentLength, len(body), r.TransferEncoding)
+		}
+		bodies <- body
+		return true
+	}
+	daily := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !capture(w, r) {
+			return
+		}
+		if r.URL.Path == "/v1internal:generateContent" {
+			// A 307 requires GetBody to replay the POST through http.Client.
+			http.Redirect(w, r, "/replayed", http.StatusTemporaryRedirect)
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer daily.Close()
+	prod := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if capture(w, r) {
+			_, _ = io.WriteString(w, `{"response":{"candidates":[]}}`)
+		}
+	}))
+	defer prod.Close()
+	const project = "project\"\\<metadata>"
+	p := New(config.Config{AccessToken: "token", ProjectID: project, DailyEndpoint: daily.URL, ProdEndpoint: prod.URL})
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1beta/models/model:generateContent", strings.NewReader(original)))
+	if w.Code != http.StatusOK || w.Body.String() != `{"candidates":[]}` {
+		t.Fatalf("generation after replay = %d: %s", w.Code, w.Body.String())
+	}
+	var first []byte
+	for i := range 3 {
+		var body []byte
+		select {
+		case body = <-bodies:
+		case <-time.After(2 * time.Second):
+			t.Fatal("missing redirect/fallback request")
+		}
+		if i == 0 {
+			first = body
+		} else if !bytes.Equal(body, first) {
+			t.Fatalf("replayed envelope changed: %s", body)
+		}
+		var envelope map[string]json.RawMessage
+		if err := json.Unmarshal(body, &envelope); err != nil {
+			t.Fatalf("invalid envelope: %v", err)
+		}
+		if string(envelope["request"]) != original {
+			t.Fatalf("raw request changed on attempt %d: %s", i, envelope["request"])
+		}
+		var gotProject string
+		if err := json.Unmarshal(envelope["project"], &gotProject); err != nil || gotProject != project {
+			t.Fatalf("metadata escaping = %q, err=%v", gotProject, err)
+		}
 	}
 }

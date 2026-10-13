@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,23 +30,20 @@ func main() {
 
 func run(args []string, output io.Writer) error {
 	if len(args) > 0 && (args[0] == "help" || args[0] == "-h" || args[0] == "--help") {
-		fmt.Fprintf(output, `Antigravity Proxy
+		variables := config.EnvironmentVariables()
+		defaults := map[string]any{
+			"ANTIGRAVITY_CLIENT_VERSION":              config.DefaultClientVersion,
+			"ANTIGRAVITY_MAX_CONCURRENT_GENERATIONS":  config.DefaultMaxConcurrentGenerations,
+			"ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS": config.DefaultQuotaPollIntervalSeconds,
+			"ANTIGRAVITY_QUOTA_HISTORY_MAX_SAMPLES":   config.DefaultQuotaHistoryMaxSamples,
+		}
+		for i, name := range variables {
+			if value, ok := defaults[name]; ok {
+				variables[i] += fmt.Sprintf(" (default %v)", value)
+			}
+		}
+		fmt.Fprintf(output, "Antigravity Proxy\n\nUsage:\n  antigravity-proxy [serve]\n  antigravity-proxy login\n\nEnvironment:\n  %s\n", strings.Join(variables, "\n  "))
 
-Usage:
-  antigravity-proxy [serve]
-  antigravity-proxy login
-
-Environment:
-  HOST, PORT, API_KEY, ANTIGRAVITY_ACCESS_TOKEN, ANTIGRAVITY_REFRESH_TOKEN,
-  ANTIGRAVITY_OAUTH_CLIENT_ID, ANTIGRAVITY_OAUTH_CLIENT_SECRET,
-  ANTIGRAVITY_PROJECT_ID, ANTIGRAVITY_DAILY_ENDPOINT, ANTIGRAVITY_PROD_ENDPOINT,
-  ANTIGRAVITY_CLIENT_VERSION (default %s), OAUTH_CALLBACK_PORT,
-  ANTIGRAVITY_MAX_CONCURRENT_GENERATIONS (default %d),
-  ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS (default %d),
-  ANTIGRAVITY_QUOTA_HISTORY_PATH,
-  ANTIGRAVITY_QUOTA_HISTORY_MAX_SAMPLES (default %d)
-`, config.DefaultClientVersion, config.DefaultMaxConcurrentGenerations,
-			config.DefaultQuotaPollIntervalSeconds, config.DefaultQuotaHistoryMaxSamples)
 		return nil
 	}
 	cfg, path, err := config.Load()

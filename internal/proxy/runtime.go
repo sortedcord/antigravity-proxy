@@ -6,13 +6,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
-	"net/url"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"antigravity-proxy/internal/httpjson"
+	"antigravity-proxy/internal/lifecycle"
 
 	"antigravity-proxy/internal/config"
 	"antigravity-proxy/internal/oauth"
@@ -49,8 +49,7 @@ type Runtime struct {
 	slots         chan struct{}
 	login         *oauth.SessionManager
 	background    sync.WaitGroup
-	closeOnce     sync.Once
-	closeErr      error
+	closer        lifecycle.Closer
 	persist       func(string, config.Credentials) error
 }
 
@@ -65,16 +64,14 @@ func newRuntime(ctx context.Context, cfg config.Config, configPath string, profi
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if cfg.MaxConcurrentGenerations <= 0 {
-		cfg.MaxConcurrentGenerations = config.DefaultMaxConcurrentGenerations
-	}
+	cfg = cfg.WithProxyDefaults()
 	if profileClient == nil {
-		profileClient = &http.Client{Timeout: 30 * time.Second}
+		profileClient = &http.Client{Timeout: oauth.DefaultHTTPTimeout}
 	}
 	ownedCtx, cancel := context.WithCancel(ctx)
 	r := &Runtime{
 		base: cfg, configPath: configPath, ctx: ownedCtx, cancel: cancel,
-		client: newUpstreamClient(5*time.Minute, 5*time.Minute), profileClient: profileClient,
+		client: newUpstreamClient(defaultHeaderTimeout, defaultBodyIdleTimeout), profileClient: profileClient,
 		slots: make(chan struct{}, cfg.MaxConcurrentGenerations), persist: config.UpdateCredentials,
 	}
 	r.login = oauth.NewSessionManagerWithClient(profileClient, r.activate)
@@ -110,21 +107,19 @@ func accountNamespace(cfg config.Config) string {
 func (r *Runtime) prepare(cfg config.Config, tokens *oauth.Tokens, previous *accountRuntime) (*accountRuntime, error) {
 	p := newProxy(cfg, r.client, r.slots, r.profileClient)
 	if tokens != nil && cfg.RefreshToken != "" {
-		p.cachedToken = tokens.AccessToken
-		seconds := tokens.ExpiresIn
-		if seconds <= 0 {
-			seconds = 3600
-		}
-		p.tokenExpiresAt = time.Now().Add(time.Duration(seconds) * time.Second)
+		p.tokens.seed(tokens.AccessToken, tokens.Expiry(time.Now()))
 	}
 	candidate := &accountRuntime{proxy: p, quota: p.QuotaFetcher(), namespace: accountNamespace(cfg)}
 	namespace := candidate.namespace
 	if previous != nil && candidate.namespace == previous.namespace {
 		candidate.status = previous.status
 	} else {
-		statusCfg := cfg
-		statusCfg.QuotaHistoryPath = status.AccountHistoryPath(r.base.QuotaHistoryPath, namespace)
-		candidate.status = status.NewService(statusCfg, func(ctx context.Context) (quota.Snapshot, error) {
+		options := status.Options{
+			HistoryPath:         status.AccountHistoryPath(r.base.QuotaHistoryPath, namespace),
+			PollIntervalSeconds: cfg.QuotaPollIntervalSeconds,
+			MaxSamples:          cfg.QuotaHistoryMaxSamples,
+		}
+		candidate.status = status.New(options, func(ctx context.Context) (quota.Snapshot, error) {
 			current := r.active.Load()
 			if current == nil || current.namespace != namespace {
 				return quota.Snapshot{}, errors.New("quota account is not active")
@@ -134,9 +129,6 @@ func (r *Runtime) prepare(cfg config.Config, tokens *oauth.Tokens, previous *acc
 			}
 			return current.quota.Fetch(ctx)
 		})
-		if err := candidate.status.Prepare(); err != nil {
-			return nil, err
-		}
 		if err := candidate.status.Start(r.ctx); err != nil {
 			_ = candidate.status.Close()
 			return nil, err
@@ -153,7 +145,7 @@ func (r *Runtime) prepare(cfg config.Config, tokens *oauth.Tokens, previous *acc
 }
 
 func (r *Runtime) resolveInitialProfile(initial *accountRuntime) {
-	ctx, cancel := context.WithTimeout(r.ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(r.ctx, oauth.DefaultHTTPTimeout)
 	defer cancel()
 	token, err := initial.proxy.accessToken(ctx)
 	if err != nil {
@@ -180,17 +172,14 @@ func (r *Runtime) promoteIdentity(ctx context.Context, initial *accountRuntime, 
 	}
 	cfg := initial.proxy.cfg
 	cfg.AccountID, cfg.AccountEmail, cfg.AccountName = user.ID, user.Email, user.Name
-	initial.proxy.tokenMu.Lock()
-	cached, expires := initial.proxy.cachedToken, initial.proxy.tokenExpiresAt
-	initial.proxy.tokenMu.Unlock()
+	cached, expires := initial.proxy.tokens.snapshot()
 	candidate, err := r.prepare(cfg, nil, initial)
 	if err != nil {
 		return err
 	}
 	// This expiry is already known, not a missing provider lifetime. Never
 	// extend an expired startup token when publishing its recovered identity.
-	candidate.proxy.cachedToken = cached
-	candidate.proxy.tokenExpiresAt = expires
+	candidate.proxy.tokens.seed(cached, expires)
 	r.publish(candidate, initial)
 	return nil
 }
@@ -204,16 +193,14 @@ func (r *Runtime) activate(ctx context.Context, tokens oauth.Tokens, clientID, c
 	if err := r.ctx.Err(); err != nil {
 		return err
 	}
-	if tokens.AccessToken == "" || strings.TrimSpace(user.ID) == "" || strings.TrimSpace(user.Email) == "" {
-		return errors.New("Google authorization did not return account credentials and identity")
+	credentials, err := oauth.LoginCredentials(tokens, clientID, clientSecret, user)
+	if err != nil {
+		return err
 	}
 	cfg := r.base
-	cfg.AccessToken, cfg.RefreshToken = "", tokens.RefreshToken
-	if tokens.RefreshToken == "" {
-		cfg.AccessToken = tokens.AccessToken
-	}
-	cfg.OAuthClientID, cfg.OAuthClientSecret = clientID, clientSecret
-	cfg.AccountID, cfg.AccountEmail, cfg.AccountName = user.ID, user.Email, user.Name
+	cfg.AccessToken, cfg.RefreshToken = credentials.AccessToken, credentials.RefreshToken
+	cfg.OAuthClientID, cfg.OAuthClientSecret = credentials.OAuthClientID, credentials.OAuthClientSecret
+	cfg.AccountID, cfg.AccountEmail, cfg.AccountName = credentials.AccountID, credentials.AccountEmail, credentials.AccountName
 	previous := r.active.Load()
 	candidate, err := r.prepare(cfg, &tokens, previous)
 	if err != nil {
@@ -232,11 +219,7 @@ func (r *Runtime) activate(ctx context.Context, tokens oauth.Tokens, clientID, c
 		abort()
 		return err
 	}
-	writeErr := r.persist(r.configPath, config.Credentials{
-		AccessToken: cfg.AccessToken, RefreshToken: cfg.RefreshToken,
-		OAuthClientID: clientID, OAuthClientSecret: clientSecret,
-		AccountID: user.ID, AccountEmail: user.Email, AccountName: user.Name,
-	})
+	writeErr := r.persist(r.configPath, credentials)
 	var committed *config.CommitError
 	if writeErr != nil && !errors.As(writeErr, &committed) {
 		abort()
@@ -259,113 +242,24 @@ func (r *Runtime) publish(candidate, previous *accountRuntime) {
 func (r *Runtime) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	current := r.active.Load()
 	if current == nil || r.ctx.Err() != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "runtime is not started"})
+		httpjson.Write(w, http.StatusServiceUnavailable, map[string]string{"error": "runtime is not started"})
 		return
 	}
 	current.proxy.ServeHTTP(w, request)
 }
 
 func (r *Runtime) Close() error {
-	r.closeOnce.Do(func() {
+	return r.closer.Close(func() error {
 		r.cancel()
 		loginErr := r.login.Close()
 		r.background.Wait()
 		r.mu.Lock()
+		var statusErr error
 		if current := r.active.Load(); current != nil {
-			r.closeErr = current.status.Close()
+			statusErr = current.status.Close()
 		}
 		r.mu.Unlock()
-		r.closeErr = errors.Join(loginErr, r.closeErr)
 		r.client.CloseIdleConnections()
+		return errors.Join(loginErr, statusErr)
 	})
-	return r.closeErr
-}
-
-func (r *Runtime) handleLogin(w http.ResponseWriter, request *http.Request) {
-	switch request.Method {
-	case http.MethodGet:
-		address, expires, err := r.login.Begin(request.Context())
-		if err != nil {
-			writeLoginError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"login_url": address, "expires_at": expires.UTC().Format(time.RFC3339)})
-	case http.MethodPost:
-		var submission struct {
-			Code  string `json:"code"`
-			State string `json:"state"`
-			URL   string `json:"url"`
-		}
-		request.Body = http.MaxBytesReader(w, request.Body, 64<<10)
-		defer request.Body.Close()
-		decoder := json.NewDecoder(request.Body)
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&submission); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid login JSON"})
-			return
-		}
-		var trailing any
-		if err := decoder.Decode(&trailing); err != io.EOF {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "login requires one JSON object"})
-			return
-		}
-		code, state := strings.TrimSpace(submission.Code), strings.TrimSpace(submission.State)
-		if submission.URL != "" {
-			if code != "" || state != "" {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provide code/state or callback URL, not both"})
-				return
-			}
-			callback, err := url.Parse(submission.URL)
-			if err != nil || callback.Scheme != "http" || callback.Hostname() != "127.0.0.1" || callback.Path != "/oauth-callback" || callback.User != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid loopback callback URL"})
-				return
-			}
-			code, state = callback.Query().Get("code"), callback.Query().Get("state")
-		}
-		if code == "" || state == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "both code and state are required"})
-			return
-		}
-		user, err := r.login.Complete(request.Context(), code, state)
-		if err != nil {
-			writeLoginError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"status": "configured", "email": user.Email, "name": user.Name})
-	default:
-		rejectUnreadBody(w, request)
-		w.Header().Set("Allow", "GET, POST")
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-	}
-}
-
-func writeLoginError(w http.ResponseWriter, err error) {
-	var commit *config.CommitError
-	if errors.As(err, &commit) {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "account activated, but credential durability could not be confirmed", "credential_configured": true, "durability_uncertain": true})
-		return
-	}
-	var activation *activationFailure
-	if errors.As(err, &activation) {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": activation.message})
-		return
-	}
-	code, message := http.StatusBadGateway, "failed to complete Google authorization"
-	switch {
-	case errors.Is(err, oauth.ErrInvalidState):
-		code, message = http.StatusBadRequest, "invalid OAuth state"
-	case errors.Is(err, oauth.ErrLoginInProgress):
-		code, message = http.StatusConflict, "login completion already in progress"
-	case errors.Is(err, oauth.ErrSessionAlreadyUsed):
-		code, message = http.StatusConflict, "OAuth session already used"
-	case errors.Is(err, oauth.ErrSessionExpired):
-		code, message = http.StatusGone, "OAuth session expired"
-	case errors.Is(err, oauth.ErrTokenEnvironment):
-		code, message = http.StatusConflict, "remove token environment overrides to use /config/login"
-	case errors.Is(err, oauth.ErrSessionManagerClosed):
-		code, message = http.StatusServiceUnavailable, "login is closed"
-	case errors.Is(err, context.Canceled):
-		code, message = http.StatusServiceUnavailable, "login canceled"
-	}
-	writeJSON(w, code, map[string]string{"error": message})
 }

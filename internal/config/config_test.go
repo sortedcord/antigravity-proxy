@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"antigravity-proxy/internal/testutil"
 )
 
 func TestValidateCloudEndpointRequiresTLSExceptLoopback(t *testing.T) {
@@ -56,32 +58,17 @@ func TestValidateListenAddressRequiresKeyOffLoopback(t *testing.T) {
 
 func isolatedLoadHome(t *testing.T) string {
 	t.Helper()
-	for _, name := range []string{
-		"HOST", "PORT", "API_KEY",
-		"ANTIGRAVITY_ACCESS_TOKEN", "ANTIGRAVITY_REFRESH_TOKEN",
-		"ANTIGRAVITY_OAUTH_CLIENT_ID", "ANTIGRAVITY_OAUTH_CLIENT_SECRET",
-		"ANTIGRAVITY_PROJECT_ID", "ANTIGRAVITY_DAILY_ENDPOINT", "ANTIGRAVITY_PROD_ENDPOINT",
-		"ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS", "ANTIGRAVITY_QUOTA_HISTORY_PATH",
-		"ANTIGRAVITY_QUOTA_HISTORY_MAX_SAMPLES", "ANTIGRAVITY_CLIENT_VERSION",
-		"ANTIGRAVITY_MAX_CONCURRENT_GENERATIONS",
-	} {
-		t.Setenv(name, "")
-		if err := os.Unsetenv(name); err != nil {
-			t.Fatalf("unset %s: %v", name, err)
-		}
-	}
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	return home
+	testutil.UnsetEnv(t, EnvironmentVariables()...)
+	return testutil.IsolateHome(t)
 }
 
 func writeLoadConfig(t *testing.T, home, contents string) string {
 	t.Helper()
 	path := filepath.Join(home, ".config", "antigravity-proxy", "config.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -223,7 +210,7 @@ func TestLoadQuotaMaximumDuration(t *testing.T) {
 func TestLoadQuotaDoesNotOpenHistory(t *testing.T) {
 	home := isolatedLoadHome(t)
 	parent := filepath.Join(home, "not-a-directory")
-	if err := os.WriteFile(parent, []byte("unchanged"), 0600); err != nil {
+	if err := os.WriteFile(parent, []byte("unchanged"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	wantHistory := filepath.Join(parent, "history.jsonl")

@@ -6,13 +6,15 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"antigravity-proxy/internal/httpjson"
 )
 
 func TestWriteJSONPreservesLinksAndHeaders(t *testing.T) {
 	const link = "https://example.com/?first=1&second=2"
 	response := httptest.NewRecorder()
 	response.Header().Set("Cache-Control", "no-store")
-	writeJSON(response, http.StatusServiceUnavailable, map[string]string{"error": link})
+	httpjson.Write(response, http.StatusServiceUnavailable, map[string]string{"error": link})
 	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Content-Type") != "application/json" || response.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("JSON response = %d %v", response.Code, response.Header())
 	}

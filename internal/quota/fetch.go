@@ -9,7 +9,10 @@ import (
 	"time"
 )
 
-const summaryPath = "/v1internal:retrieveUserQuotaSummary"
+// SummaryPath is the authoritative shared-pool quota RPC.
+const SummaryPath = "/v1internal:retrieveUserQuotaSummary"
+
+const fetchTimeout = 5 * time.Minute
 
 // ErrAuthenticationBusy means the shared account cache is owned by another
 // request. Polling must fail this attempt rather than wait for that request.
@@ -23,7 +26,10 @@ var ErrAuthenticationBusy = errors.New("quota authentication is busy")
 type Transport struct {
 	AccessToken func(context.Context) (string, error)
 	ProjectID   func() string
-	Post        func(ctx context.Context, token, path, accept string, payload any) (*http.Response, error)
+	// PostSummary receives explicit project metadata, avoiding payload type switches.
+	PostSummary func(ctx context.Context, token, project string) (*http.Response, error)
+	// Post is retained for callers that supply a generic JSON transport.
+	Post func(ctx context.Context, token, path, accept string, payload any) (*http.Response, error)
 }
 
 // Fetcher obtains authoritative quota without owning OAuth or transport caches.
@@ -39,7 +45,7 @@ func NewFetcher(transport Transport) *Fetcher {
 // Fetch builds and parses one bounded quota request. Only credential-safe errors
 // escape this boundary; cancellation remains recognizable by callers.
 func (f *Fetcher) Fetch(ctx context.Context) (Snapshot, error) {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return Snapshot{}, err
@@ -54,20 +60,11 @@ func (f *Fetcher) Fetch(ctx context.Context) (Snapshot, error) {
 		}
 		return Snapshot{}, errors.New("authenticate quota request failed")
 	}
-	payload := make(map[string]string, 1)
-	if projectID := f.transport.ProjectID(); projectID != "" {
-		payload["project"] = projectID
-	}
-	resp, err := f.transport.Post(ctx, token, summaryPath, "application/json", payload)
+	project := f.transport.ProjectID()
+	resp, err := f.postSummary(ctx, token, project)
 	if err != nil {
-		if ctx.Err() != nil {
-			return Snapshot{}, ctx.Err()
-		}
-		if errors.Is(err, context.DeadlineExceeded) {
-			return Snapshot{}, context.DeadlineExceeded
-		}
-		if errors.Is(err, context.Canceled) {
-			return Snapshot{}, context.Canceled
+		if cancellation := cancellationError(ctx, err); cancellation != nil {
+			return Snapshot{}, cancellation
 		}
 		var upstream interface{ HTTPStatus() int }
 		if errors.As(err, &upstream) {
@@ -79,14 +76,8 @@ func (f *Fetcher) Fetch(ctx context.Context) (Snapshot, error) {
 	const maxQuotaSize = 8 << 20
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxQuotaSize+1))
 	if err != nil {
-		if ctx.Err() != nil {
-			return Snapshot{}, ctx.Err()
-		}
-		if errors.Is(err, context.DeadlineExceeded) {
-			return Snapshot{}, context.DeadlineExceeded
-		}
-		if errors.Is(err, context.Canceled) {
-			return Snapshot{}, context.Canceled
+		if cancellation := cancellationError(ctx, err); cancellation != nil {
+			return Snapshot{}, cancellation
 		}
 		return Snapshot{}, errors.New("read quota response failed")
 	}

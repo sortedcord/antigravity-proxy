@@ -118,7 +118,7 @@ func TestFetchQuotaSnapshotReusesTokenCacheAndEndpointFallback(t *testing.T) {
 	}))
 	defer prod.Close()
 	p := New(config.Config{RefreshToken: "unused-test-refresh-token", DailyEndpoint: daily.URL, ProdEndpoint: prod.URL})
-	p.cachedToken, p.tokenExpiresAt = "cached-test-token", time.Now().Add(time.Hour)
+	p.tokens.cachedToken, p.tokens.expiresAt = "cached-test-token", time.Now().Add(time.Hour)
 	if _, err := p.QuotaFetcher().Fetch(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -320,11 +320,11 @@ func TestQuotaCollectorCloseDoesNotWaitForUnrelatedTokenRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Model a native request that owns tokenMu throughout its OAuth refresh.
-	p.tokenMu.Lock()
+	p.tokens.mu.Lock()
 	locked := true
 	defer func() {
 		if locked {
-			p.tokenMu.Unlock()
+			p.tokens.mu.Unlock()
 		}
 		if err := collector.Close(); err != nil {
 			t.Errorf("collector cleanup: %v", err)
@@ -356,8 +356,8 @@ func TestQuotaCollectorCloseDoesNotWaitForUnrelatedTokenRefresh(t *testing.T) {
 	}
 	// Simulate that native refresh completing. The following quota fetch must
 	// use this cache without performing an additional OAuth request.
-	p.cachedToken, p.tokenExpiresAt = "freshly-cached-token", time.Now().Add(time.Hour)
-	p.tokenMu.Unlock()
+	p.tokens.cachedToken, p.tokens.expiresAt = "freshly-cached-token", time.Now().Add(time.Hour)
+	p.tokens.mu.Unlock()
 	locked = false
 	snapshot, err := p.QuotaFetcher().Fetch(context.Background())
 	if err != nil || snapshot.Pools.Gemini.FiveHour.Status != "available" || quotaCalls.Load() != 1 {
@@ -378,12 +378,12 @@ func TestFetchQuotaSnapshotSkipsBusyTokenRefreshAndRecovers(t *testing.T) {
 	}))
 	defer upstream.Close()
 	p := New(config.Config{RefreshToken: "busy-refresh-secret", DailyEndpoint: upstream.URL, ProdEndpoint: upstream.URL})
-	p.tokenMu.Lock()
+	p.tokens.mu.Lock()
 	locked := true
 	done := make(chan struct{})
 	defer func() {
 		if locked {
-			p.tokenMu.Unlock()
+			p.tokens.mu.Unlock()
 		}
 		<-done
 	}()
@@ -404,8 +404,8 @@ func TestFetchQuotaSnapshotSkipsBusyTokenRefreshAndRecovers(t *testing.T) {
 	if calls.Load() != 0 {
 		t.Fatal("busy quota authentication issued an upstream request")
 	}
-	p.cachedToken, p.tokenExpiresAt = "direct-fresh-cache", time.Now().Add(time.Hour)
-	p.tokenMu.Unlock()
+	p.tokens.cachedToken, p.tokens.expiresAt = "direct-fresh-cache", time.Now().Add(time.Hour)
+	p.tokens.mu.Unlock()
 	locked = false
 	if _, err := p.QuotaFetcher().Fetch(context.Background()); err != nil || calls.Load() != 1 {
 		t.Fatalf("following quota fetch failed to reuse fresh cache: %v, calls = %d", err, calls.Load())

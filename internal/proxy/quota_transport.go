@@ -2,26 +2,10 @@ package proxy
 
 import (
 	"context"
+	"net/http"
 
 	"antigravity-proxy/internal/quota"
 )
-
-// quotaAccessToken shares native cache and refresh behavior but never waits for
-// an unrelated OAuth refresh owner. A busy owner causes this poll to fail;
-// subsequent scheduled polls can use the owner's refreshed cache.
-func (p *Proxy) quotaAccessToken(ctx context.Context) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	if p.cfg.AccessToken != "" || p.cfg.RefreshToken == "" {
-		return p.accessToken(ctx)
-	}
-	if !p.tokenMu.TryLock() {
-		return "", quota.ErrAuthenticationBusy
-	}
-	defer p.tokenMu.Unlock()
-	return p.accessTokenLocked(ctx)
-}
 
 // quotaProjectID only inspects the existing account cache. Native project
 // discovery never delays quota polling and is never initiated by a poll.
@@ -40,6 +24,12 @@ func (p *Proxy) QuotaFetcher() *quota.Fetcher {
 	return quota.NewFetcher(quota.Transport{
 		AccessToken: p.quotaAccessToken,
 		ProjectID:   p.quotaProjectID,
-		Post:        p.postToAntigravity,
+		PostSummary: func(ctx context.Context, token, project string) (*http.Response, error) {
+			payload := make(map[string]string, 1)
+			if project != "" {
+				payload["project"] = project
+			}
+			return p.postJSON(ctx, token, quota.SummaryPath, project, payload)
+		},
 	})
 }

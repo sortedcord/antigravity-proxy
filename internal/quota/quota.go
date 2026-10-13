@@ -46,16 +46,16 @@ type Pool struct {
 // Window describes a known bucket. Nil values mean unreported or unusable data,
 // never zero. RemainingAmount retains the upstream int64 string without units.
 type Window struct {
-	BucketID          string     `json:"bucket_id"`
-	Window            string     `json:"window"`
-	Status            string     `json:"status"`
-	Disabled          bool       `json:"disabled"`
-	RemainingFraction *float64   `json:"remaining_fraction"`
-	RemainingPercent  *float64   `json:"remaining_percent"`
-	UsedPercent       *float64   `json:"used_percent"`
-	RemainingAmount   *string    `json:"remaining_amount"`
-	ResetAt           *time.Time `json:"reset_at"`
-	UnavailableReason string     `json:"unavailable_reason,omitempty"`
+	BucketID          string       `json:"bucket_id"`
+	Window            string       `json:"window"`
+	Status            WindowStatus `json:"status"`
+	Disabled          bool         `json:"disabled"`
+	RemainingFraction *float64     `json:"remaining_fraction"`
+	RemainingPercent  *float64     `json:"remaining_percent"`
+	UsedPercent       *float64     `json:"used_percent"`
+	RemainingAmount   *string      `json:"remaining_amount"`
+	ResetAt           *time.Time   `json:"reset_at"`
+	UnavailableReason string       `json:"unavailable_reason,omitempty"`
 }
 
 type rawBucket struct {
@@ -79,13 +79,12 @@ type reportedBucket struct {
 // window unavailable; malformed envelopes and conflicting duplicates are errors.
 // Every call owns its resulting pointer values independently of all other calls.
 func Parse(body []byte, observedAt time.Time) (Snapshot, error) {
-	snapshot := Snapshot{
-		ObservedAt: observedAt,
-		Source:     "retrieveUserQuotaSummary",
-		Pools: Pools{
-			Gemini:     Pool{ID: GeminiPool, FiveHour: missing("gemini-5h", FiveHourWindow), Weekly: missing("gemini-weekly", WeeklyWindow)},
-			ThirdParty: Pool{ID: ThirdPartyPool, FiveHour: missing("3p-5h", FiveHourWindow), Weekly: missing("3p-weekly", WeeklyWindow)},
-		},
+	snapshot := Snapshot{ObservedAt: observedAt, Source: "retrieveUserQuotaSummary"}
+	targets := make(map[string]Bucket, 4)
+	for _, bucket := range snapshot.Buckets() {
+		bucket.Pool.ID = bucket.PoolID
+		*bucket.Window = missing(bucket.ID, bucket.WindowID)
+		targets[bucket.ID] = bucket
 	}
 	var buckets []reportedBucket
 	if err := collectBuckets(body, 0, &buckets); err != nil {
@@ -97,20 +96,11 @@ func Parse(body []byte, observedAt time.Time) (Snapshot, error) {
 		if json.Unmarshal(reported.bucket.BucketID, &id) != nil {
 			continue
 		}
-		var target *Window
-		var pool *Pool
-		switch id {
-		case "gemini-5h":
-			pool, target = &snapshot.Pools.Gemini, &snapshot.Pools.Gemini.FiveHour
-		case "gemini-weekly":
-			pool, target = &snapshot.Pools.Gemini, &snapshot.Pools.Gemini.Weekly
-		case "3p-5h":
-			pool, target = &snapshot.Pools.ThirdParty, &snapshot.Pools.ThirdParty.FiveHour
-		case "3p-weekly":
-			pool, target = &snapshot.Pools.ThirdParty, &snapshot.Pools.ThirdParty.Weekly
-		default:
+		bucket, known := targets[id]
+		if !known {
 			continue
 		}
+		pool, target := bucket.Pool, bucket.Window
 		if reported.groupName != "" {
 			if pool.DisplayName != "" && pool.DisplayName != reported.groupName {
 				return Snapshot{}, fmt.Errorf("conflicting quota pool display name for %s", pool.ID)
@@ -130,7 +120,7 @@ func Parse(body []byte, observedAt time.Time) (Snapshot, error) {
 }
 
 func missing(id, window string) Window {
-	return Window{BucketID: id, Window: window, Status: "unavailable", UnavailableReason: "not_reported"}
+	return Window{BucketID: id, Window: window, Status: StatusUnavailable, UnavailableReason: "not_reported"}
 }
 
 func collectBuckets(body []byte, depth int, buckets *[]reportedBucket) error {
@@ -221,7 +211,7 @@ func parseWindow(raw rawBucket, window Window) Window {
 		}
 	}
 	if window.Disabled {
-		window.Status, window.UnavailableReason = "disabled", "upstream_disabled"
+		window.Status, window.UnavailableReason = StatusDisabled, "upstream_disabled"
 		window.RemainingAmount = nil
 		return window
 	}
@@ -233,7 +223,7 @@ func parseWindow(raw rawBucket, window Window) Window {
 		window.UnavailableReason = "quota_not_reported"
 		return window
 	}
-	window.Status, window.UnavailableReason = "available", ""
+	window.Status, window.UnavailableReason = StatusAvailable, ""
 	if fraction != nil {
 		window.RemainingFraction = fraction
 		remaining, used := *fraction*100, (1-*fraction)*100

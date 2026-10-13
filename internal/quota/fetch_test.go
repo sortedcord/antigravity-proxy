@@ -65,7 +65,7 @@ func TestFetchQuotaSnapshotObservesAvailableDisabledMissingAndRecovery(t *testin
 	}
 	for _, test := range []struct {
 		body   string
-		status string
+		status WindowStatus
 	}{
 		{`{"buckets":[{"bucketId":"3p-weekly","disabled":true}]}`, "disabled"},
 		{`{"buckets":[]}`, "unavailable"},

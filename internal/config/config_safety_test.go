@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -127,7 +128,7 @@ func TestLoadRequiresPrivatePermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows uses directory ACLs rather than Unix mode bits")
 	}
-	for _, mode := range []os.FileMode{0600, 0400, 0640, 0604, 0644, 0666} {
+	for _, mode := range []os.FileMode{0o600, 0o400, 0o640, 0o604, 0o644, 0o666} {
 		t.Run(fmt.Sprintf("%o", mode), func(t *testing.T) {
 			home := isolatedLoadHome(t)
 			path := writeLoadConfig(t, home, `{}`)
@@ -135,7 +136,7 @@ func TestLoadRequiresPrivatePermissions(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, _, err := Load()
-			if (err != nil) != (mode&0077 != 0) {
+			if (err != nil) != (mode&0o077 != 0) {
 				t.Fatalf("Load mode %o returned %v", mode, err)
 			}
 		})
@@ -252,7 +253,7 @@ func TestSaveConcurrentWritersKeepCompletePrivateConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatal("saved configuration is not private")
 	}
 	entries, err := os.ReadDir(filepath.Dir(path))
@@ -264,10 +265,10 @@ func TestSaveConcurrentWritersKeepCompletePrivateConfig(t *testing.T) {
 func TestSaveFailureCleansTemporaryFile(t *testing.T) {
 	parent := t.TempDir()
 	path := filepath.Join(parent, "config.json")
-	if err := os.Mkdir(path, 0700); err != nil {
+	if err := os.Mkdir(path, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(path, "keep"), []byte("unchanged"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(path, "keep"), []byte("unchanged"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := Save(path, Config{RefreshToken: "new-token"}); err == nil {
@@ -409,7 +410,7 @@ func TestUpdateCredentialsPreservesDiskWithoutEnvironmentOrDefaults(t *testing.T
 		t.Fatal(err)
 	}
 	// Simulate a disk edit after login began; credential persistence must reread it.
-	if err := os.WriteFile(path, []byte(`{"projectId":"latest-project","accountId":"old-account"}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"projectId":"latest-project","accountId":"old-account"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := UpdateCredentials(path, Credentials{RefreshToken: "new-refresh", OAuthClientID: "new-client", OAuthClientSecret: "new-secret", AccountID: "new-account", AccountEmail: "new@example.com", AccountName: "New Name"}); err != nil {
@@ -442,6 +443,9 @@ type failingConfigTemporaryFile struct {
 func (file *failingConfigTemporaryFile) Write(data []byte) (int, error) {
 	if file.stage == "write" {
 		return 0, file.err
+	}
+	if file.stage == "short write" {
+		return 0, nil
 	}
 	return file.configTemporaryFile.Write(data)
 }
@@ -478,15 +482,18 @@ func (directory *recordingConfigDirectory) Close() error {
 }
 
 func TestConfigSavePrecommitFailuresPreserveDestination(t *testing.T) {
-	for _, stage := range []string{"mkdir", "directory open", "temporary create", "write", "file sync", "file close", "rename"} {
+	for _, stage := range []string{"mkdir", "directory open", "temporary create", "write", "short write", "file sync", "file close", "rename"} {
 		t.Run(stage, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "config.json")
 			old := []byte(`{"refreshToken":"old-token","accountId":"old-account"}`)
-			if err := os.WriteFile(path, old, 0600); err != nil {
+			if err := os.WriteFile(path, old, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			failure := errors.New("injected precommit filesystem failure")
+			if stage == "short write" {
+				failure = io.ErrShortWrite
+			}
 			fs := localConfigFilesystem()
 			directory := &recordingConfigDirectory{}
 			opened := false
@@ -543,7 +550,7 @@ func TestConfigSavePrecommitFailuresPreserveDestination(t *testing.T) {
 func TestConfigSavePostcommitDirectorySyncFailureReportsCommitted(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"refreshToken":"old-token"}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"refreshToken":"old-token"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	failure := errors.New("injected secret-marker /private/config/path sync failure")
@@ -578,7 +585,7 @@ func TestConfigSavePostcommitDirectorySyncFailureReportsCommitted(t *testing.T) 
 		t.Fatal("postcommit failure did not sync and close the retained directory")
 	}
 	info, statErr := os.Stat(path)
-	if statErr != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0600) {
+	if statErr != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
 		t.Fatal("postcommit configuration was not private", statErr)
 	}
 	entries, readErr := os.ReadDir(filepath.Dir(path))

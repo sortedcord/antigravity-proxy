@@ -91,7 +91,7 @@ func TestQuotaStatusCompositionSharesAccountAndNativeTransport(t *testing.T) {
 	defer upstream.Close()
 	cfg := config.Config{APIKey: "local-key", RefreshToken: "unused-refresh-token", ProjectID: "shared-project", DailyEndpoint: upstream.URL, ProdEndpoint: upstream.URL, QuotaHistoryPath: filepath.Join(t.TempDir(), "usage.jsonl")}
 	p := New(cfg)
-	p.cachedToken, p.tokenExpiresAt = "shared-cached-token", time.Now().Add(time.Hour)
+	p.tokens.cachedToken, p.tokens.expiresAt = "shared-cached-token", time.Now().Add(time.Hour)
 	service := quotastatus.NewService(cfg, p.QuotaFetcher().Fetch)
 	p.StatusHandler = service
 	if err := service.Start(context.Background()); err != nil {

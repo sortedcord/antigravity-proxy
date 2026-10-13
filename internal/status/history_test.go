@@ -111,7 +111,7 @@ func TestRestartReloadsDurableSnapshotAndPollingTime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fileInfo.Mode().Perm() != 0600 || dirInfo.Mode().Perm() != 0700 {
+	if fileInfo.Mode().Perm() != 0o600 || dirInfo.Mode().Perm() != 0o700 {
 		t.Fatalf("storage modes = %v/%v", fileInfo.Mode().Perm(), dirInfo.Mode().Perm())
 	}
 	if err := c.Close(); err != nil {
@@ -254,7 +254,7 @@ func TestHistoryInvalidQueriesAndBoundedOutput(t *testing.T) {
 
 func TestSnapshotsAndQueryResultsAreIndependent(t *testing.T) {
 	original := observation(observationTime(), 0.4)
-	want := cloneSnapshot(original)
+	want := original.Clone()
 	c := openTestCollector(t, filepath.Join(t.TempDir(), "history"), time.Second, func(context.Context) (quota.Snapshot, error) { return original, nil })
 	c.poll(context.Background())
 	*original.Pools.Gemini.FiveHour.RemainingFraction = 0.9
@@ -301,7 +301,7 @@ func TestOpenRejectsInvalidStorageAndIntervals(t *testing.T) {
 		})
 	}
 	blocked := filepath.Join(dir, "file")
-	if err := os.WriteFile(blocked, []byte("not a directory"), 0600); err != nil {
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if c, err := Open(filepath.Join(blocked, "usage"), time.Second, 0, fetch); err == nil {
@@ -314,7 +314,7 @@ func TestOpenRejectsInvalidStorageAndIntervals(t *testing.T) {
 	}
 	for _, content := range []string{"{broken}\n", "{}\n", string(valid) + "\n\n", "{broken}\n" + string(valid)} {
 		path := filepath.Join(t.TempDir(), "corrupt")
-		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if c, err := Open(path, time.Second, 0, fetch); err == nil {
@@ -344,7 +344,7 @@ func TestInvalidObservationsDoNotAppend(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			current := cloneSnapshot(good)
+			current := good.Clone()
 			path := filepath.Join(t.TempDir(), "history")
 			c := openTestCollector(t, path, time.Second, func(context.Context) (quota.Snapshot, error) { return current, nil })
 			c.poll(context.Background())
@@ -352,7 +352,7 @@ func TestInvalidObservationsDoNotAppend(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			current = cloneSnapshot(good)
+			current = good.Clone()
 			tc.mutate(&current)
 			c.poll(context.Background())
 			if info := requireSnapshot(t, c, good); info.LastError == "" {

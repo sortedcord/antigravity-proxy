@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -18,25 +17,15 @@ import (
 	"sync"
 	"testing"
 
+	"antigravity-proxy/internal/testutil"
+
 	"antigravity-proxy/internal/config"
 )
 
 func oauthConfigHome(t *testing.T) string {
 	t.Helper()
-	for _, name := range []string{
-		"HOST", "PORT", "API_KEY", "ANTIGRAVITY_ACCESS_TOKEN", "ANTIGRAVITY_REFRESH_TOKEN",
-		"ANTIGRAVITY_OAUTH_CLIENT_ID", "ANTIGRAVITY_OAUTH_CLIENT_SECRET", "ANTIGRAVITY_PROJECT_ID",
-		"ANTIGRAVITY_DAILY_ENDPOINT", "ANTIGRAVITY_PROD_ENDPOINT", "ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS",
-		"ANTIGRAVITY_QUOTA_HISTORY_PATH", "ANTIGRAVITY_QUOTA_HISTORY_MAX_SAMPLES",
-		"ANTIGRAVITY_CLIENT_VERSION", "ANTIGRAVITY_MAX_CONCURRENT_GENERATIONS",
-	} {
-		t.Setenv(name, "")
-		if err := os.Unsetenv(name); err != nil {
-			t.Fatal(err)
-		}
-	}
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testutil.UnsetEnv(t, config.EnvironmentVariables()...)
+	home := testutil.IsolateHome(t)
 	return filepath.Join(home, ".config", "antigravity-proxy", "config.json")
 }
 
@@ -46,10 +35,10 @@ func TestLoginPersistenceDoesNotLeakEnvironmentOrDefaults(t *testing.T) {
 			path := oauthConfigHome(t)
 			original := []byte(`{"host":"127.0.0.1","apiKey":"saved-key","projectId":"original","quotaHistoryPath":"saved-history.jsonl","quotaHistoryMaxSamples":41,"maxConcurrentGenerations":3,"clientVersion":"saved-version","accessToken":"old-access","refreshToken":"old-refresh"}`)
 			if exists {
-				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(path, original, 0600); err != nil {
+				if err := os.WriteFile(path, original, 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -69,7 +58,7 @@ func TestLoginPersistenceDoesNotLeakEnvironmentOrDefaults(t *testing.T) {
 			// configuration snapshot loaded before authorization.
 			if exists {
 				original = bytes.ReplaceAll(original, []byte(`"original"`), []byte(`"edited-during-login"`))
-				if err := os.WriteFile(path, original, 0600); err != nil {
+				if err := os.WriteFile(path, original, 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -109,7 +98,7 @@ func TestLoginPersistenceRejectsUnsafeDiskWithoutChangingIt(t *testing.T) {
 	for _, contents := range []string{`{"typoSetting":"keep"}`, `{} {}`, `null`, `{"host":`} {
 		t.Run(contents, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.json")
-			if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if err := saveLoginTokens(path, Tokens{AccessToken: "new"}, "id", "secret", testUserInfo()); err == nil {
@@ -125,10 +114,10 @@ func TestLoginPersistenceRejectsUnsafeDiskWithoutChangingIt(t *testing.T) {
 		return
 	}
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(path, 0644); err != nil {
+	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := saveLoginTokens(path, Tokens{AccessToken: "new"}, "id", "secret", testUserInfo()); err == nil {
@@ -138,7 +127,7 @@ func TestLoginPersistenceRejectsUnsafeDiskWithoutChangingIt(t *testing.T) {
 
 func TestConcurrentLoginPersistenceKeepsMatchingCredentials(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"projectId":"keep","quotaHistoryMaxSamples":33}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"projectId":"keep","quotaHistoryMaxSamples":33}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	const writers = 24
@@ -179,18 +168,10 @@ func TestConcurrentLoginPersistenceKeepsMatchingCredentials(t *testing.T) {
 	}
 }
 
-type failingOAuthTransport struct{}
-
-func (failingOAuthTransport) RoundTrip(*http.Request) (*http.Response, error) {
-	return nil, errors.New("transport-secret-must-not-escape")
-}
-
 func TestOAuthFailuresDoNotExposeTokenResponseOrTransportDetails(t *testing.T) {
 	clearOAuthEnvironment(t)
 	id, secret := syntheticPair(t)
 	cfg := config.Config{OAuthClientID: id, OAuthClientSecret: secret, RefreshToken: "saved-refresh"}
-	original := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = original })
 	for _, test := range []struct {
 		name   string
 		status int
@@ -206,16 +187,12 @@ func TestOAuthFailuresDoNotExposeTokenResponseOrTransportDetails(t *testing.T) {
 				_, _ = io.WriteString(w, test.body)
 			}))
 			defer server.Close()
-			target, err := url.Parse(server.URL)
-			if err != nil {
-				t.Fatal(err)
-			}
-			http.DefaultTransport = oauthTestTransport{base: original, target: target}
+			client := testutil.RedirectClient(t, server.URL)
 			for _, exchange := range []func() (Tokens, error){
 				func() (Tokens, error) {
-					return exchangeOAuthCode(context.Background(), "code", "verifier", "http://127.0.0.1/callback", id, secret)
+					return exchangeOAuthCodeWithClient(context.Background(), client, "code", "verifier", "http://127.0.0.1/callback", id, secret)
 				},
-				func() (Tokens, error) { return Refresh(context.Background(), cfg) },
+				func() (Tokens, error) { return RefreshWithClient(context.Background(), cfg, client) },
 			} {
 				tokens, err := exchange()
 				if err == nil || tokens.AccessToken != "" || strings.Contains(err.Error(), "must-not-escape") {
@@ -224,11 +201,13 @@ func TestOAuthFailuresDoNotExposeTokenResponseOrTransportDetails(t *testing.T) {
 			}
 		})
 	}
-	http.DefaultTransport = failingOAuthTransport{}
-	if _, err := Refresh(context.Background(), cfg); err == nil || strings.Contains(err.Error(), "must-not-escape") {
+	client := &http.Client{Transport: testutil.RoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("transport-secret-must-not-escape")
+	})}
+	if _, err := RefreshWithClient(context.Background(), cfg, client); err == nil || strings.Contains(err.Error(), "must-not-escape") {
 		t.Fatal("OAuth refresh exposed transport error details")
 	}
-	if _, err := exchangeOAuthCode(context.Background(), "code", "verifier", "http://127.0.0.1/callback", id, secret); err == nil || strings.Contains(err.Error(), "must-not-escape") {
+	if _, err := exchangeOAuthCodeWithClient(context.Background(), client, "code", "verifier", "http://127.0.0.1/callback", id, secret); err == nil || strings.Contains(err.Error(), "must-not-escape") {
 		t.Fatal("OAuth code exchange exposed transport error details")
 	}
 }
@@ -241,10 +220,10 @@ func TestLoginPersistenceCanonicalizesUniqueCredentialAliases(t *testing.T) {
 		} {
 			t.Run(fmt.Sprintf("refresh=%t/case-%d", refreshToken != "", index), func(t *testing.T) {
 				path := oauthConfigHome(t)
-				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+				if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				if err := saveLoginTokens(path, Tokens{AccessToken: "new-access", RefreshToken: refreshToken}, "new-id", "new-secret", testUserInfo()); err != nil {

@@ -8,17 +8,19 @@ import (
 	"net"
 	"net/http"
 	"net/mail"
-	"os"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 
 	"antigravity-proxy/internal/config"
+	"antigravity-proxy/internal/lifecycle"
 )
 
-const oauthUserInfoURL = "https://www.googleapis.com/oauth2/v2/userinfo"
-const sessionLifetime = 5 * time.Minute
+const (
+	oauthUserInfoURL = "https://www.googleapis.com/oauth2/v2/userinfo"
+	sessionLifetime  = 5 * time.Minute
+)
 
 var (
 	ErrInvalidState         = errors.New("invalid or expired OAuth state")
@@ -39,13 +41,13 @@ type UserInfo struct {
 
 // FetchUserInfo retrieves and validates the user's identity from Google.
 func FetchUserInfo(ctx context.Context, accessToken string) (UserInfo, error) {
-	return FetchUserInfoWithClient(ctx, accessToken, &http.Client{Timeout: 15 * time.Second})
+	return FetchUserInfoWithClient(ctx, accessToken, &http.Client{Timeout: defaultUserInfoTimeout})
 }
 
 // FetchUserInfoWithClient retrieves a validated identity using the supplied client.
 func FetchUserInfoWithClient(ctx context.Context, accessToken string, client *http.Client) (UserInfo, error) {
 	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
+		client = &http.Client{Timeout: defaultUserInfoTimeout}
 	}
 	return fetchUserInfo(ctx, client, accessToken)
 }
@@ -89,27 +91,29 @@ func validateUserInfo(info UserInfo) error {
 	return nil
 }
 
-type SessionStatus string
+type sessionStatus string
 
 const (
-	SessionStatusPending    SessionStatus = "pending"
-	SessionStatusExchanging SessionStatus = "exchanging"
-	SessionStatusCompleted  SessionStatus = "completed"
-	SessionStatusFailed     SessionStatus = "failed"
-	SessionStatusExpired    SessionStatus = "expired"
+	sessionPending    sessionStatus = "pending"
+	sessionExchanging sessionStatus = "exchanging"
+	sessionCompleted  sessionStatus = "completed"
+	sessionFailed     sessionStatus = "failed"
+	sessionExpired    sessionStatus = "expired"
 )
 
-// LoginSession represents one OAuth attempt. Terminal attempts cannot be replayed.
-type LoginSession struct {
-	State        string
-	Verifier     string
-	RedirectURI  string
-	ClientID     string
-	ClientSecret string
-	AuthURL      string
-	ExpiresAt    time.Time
+// loginSession represents one OAuth attempt. Terminal attempts cannot be replayed.
+type loginSession struct {
+	state        string
+	verifier     string
+	redirectURI  string
+	clientID     string
+	clientSecret string
+	authURL      string
+	expiresAt    time.Time
 
-	status      SessionStatus
+	status      sessionStatus
+	done        chan struct{}
+	result      error
 	listener    net.Listener
 	server      *http.Server
 	expiryTimer *time.Timer
@@ -122,34 +126,34 @@ type OnAccountConfiguredFunc func(ctx context.Context, tokens Tokens, clientID, 
 // SessionManager owns authorization resources, never configuration persistence.
 type SessionManager struct {
 	mu           sync.Mutex
-	activationMu sync.Mutex
-	active       *LoginSession
+	active       *loginSession
 	onConfigured OnAccountConfiguredFunc
 	client       *http.Client
 	ctx          context.Context
 	cancel       context.CancelFunc
 	closed       bool
-	closeDone    chan struct{}
-	work         sync.WaitGroup
+	closer       lifecycle.Closer
+	// CLI login can persist replacements even with token environment overrides;
+	// the management API cannot activate them while those overrides are present.
+	cli  bool
+	work sync.WaitGroup
 }
 
 func NewSessionManager(onConfigured OnAccountConfiguredFunc) *SessionManager {
-	return NewSessionManagerWithClient(&http.Client{Timeout: 30 * time.Second}, onConfigured)
+	return NewSessionManagerWithClient(&http.Client{Timeout: DefaultHTTPTimeout}, onConfigured)
 }
 
 // NewSessionManagerWithClient uses client for both token exchange and userinfo.
 func NewSessionManagerWithClient(client *http.Client, onConfigured OnAccountConfiguredFunc) *SessionManager {
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		client = &http.Client{Timeout: DefaultHTTPTimeout}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &SessionManager{client: client, onConfigured: onConfigured, ctx: ctx, cancel: cancel, closeDone: make(chan struct{})}
+	return &SessionManager{client: client, onConfigured: onConfigured, ctx: ctx, cancel: cancel}
 }
 
 func tokenOverrideError() error {
-	_, accessSet := os.LookupEnv("ANTIGRAVITY_ACCESS_TOKEN")
-	_, refreshSet := os.LookupEnv("ANTIGRAVITY_REFRESH_TOKEN")
-	if accessSet || refreshSet {
+	if config.TokenEnvironmentOverrides() {
 		return ErrTokenEnvironment
 	}
 	return nil
@@ -165,20 +169,22 @@ func (m *SessionManager) Begin(ctx context.Context) (string, time.Time, error) {
 	if err := ctx.Err(); err != nil {
 		return "", time.Time{}, err
 	}
-	if err := tokenOverrideError(); err != nil {
-		return "", time.Time{}, err
+	if !m.cli {
+		if err := tokenOverrideError(); err != nil {
+			return "", time.Time{}, err
+		}
 	}
 	now := time.Now()
 	if m.active != nil {
-		if m.active.status == SessionStatusExchanging {
+		if m.active.status == sessionExchanging {
 			return "", time.Time{}, ErrLoginInProgress
 		}
-		if m.active.status == SessionStatusPending && now.Before(m.active.ExpiresAt) {
-			return m.active.AuthURL, m.active.ExpiresAt, nil
+		if m.active.status == sessionPending && now.Before(m.active.expiresAt) {
+			return m.active.authURL, m.active.expiresAt, nil
 		}
 		m.cleanupSessionLocked(m.active)
 	}
-	clientID, clientSecret, err := resolveLoginCredentials(ctx)
+	clientID, clientSecret, err := resolveLoginCredentials()
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -192,10 +198,11 @@ func (m *SessionManager) Begin(ctx context.Context) (string, time.Time, error) {
 		_ = listener.Close()
 		return "", time.Time{}, err
 	}
-	sess := &LoginSession{
-		State: authReq.state, Verifier: authReq.verifier, RedirectURI: redirectURI,
-		ClientID: clientID, ClientSecret: clientSecret, AuthURL: authReq.authURL,
-		ExpiresAt: now.Add(sessionLifetime), status: SessionStatusPending, listener: listener,
+	sess := &loginSession{
+		state: authReq.state, verifier: authReq.verifier, redirectURI: redirectURI,
+		clientID: clientID, clientSecret: clientSecret, authURL: authReq.authURL,
+		expiresAt: now.Add(sessionLifetime), status: sessionPending, listener: listener,
+		done: make(chan struct{}),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/oauth-callback", func(w http.ResponseWriter, r *http.Request) {
@@ -206,7 +213,7 @@ func (m *SessionManager) Begin(ctx context.Context) (string, time.Time, error) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if r.URL.Query().Get("state") != sess.State {
+		if r.URL.Query().Get("state") != sess.state {
 			http.Error(w, "OAuth state mismatch", http.StatusBadRequest)
 			return
 		}
@@ -215,7 +222,14 @@ func (m *SessionManager) Begin(ctx context.Context) (string, time.Time, error) {
 			http.Error(w, "Authorization failed. You may close this tab.", http.StatusBadRequest)
 			return
 		}
-		user, err := m.Complete(r.Context(), r.URL.Query().Get("code"), sess.State)
+		code := r.URL.Query().Get("code")
+		// The CLI historically ignores empty stray callbacks while waiting.
+		// Management completions consume a matching state even on failure.
+		if m.cli && strings.TrimSpace(code) == "" {
+			http.Error(w, "missing authorization code", http.StatusBadRequest)
+			return
+		}
+		user, err := m.Complete(r.Context(), code, sess.state)
 		if err != nil {
 			var committed *config.CommitError
 			if errors.As(err, &committed) {
@@ -239,25 +253,34 @@ func (m *SessionManager) Begin(ctx context.Context) (string, time.Time, error) {
 	m.work.Add(1)
 	go func() {
 		defer m.work.Done()
-		_ = server.Serve(listener)
+		serveErr := server.Serve(listener)
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if serveErr != nil && !m.closed && sess.status == sessionPending {
+			sess.status = sessionFailed
+			m.finishSessionLocked(sess, errors.New("OAuth callback server stopped"))
+			m.cleanupSessionLocked(sess)
+		}
 	}()
-	return sess.AuthURL, sess.ExpiresAt, nil
+	return sess.authURL, sess.expiresAt, nil
 }
 
-func (m *SessionManager) expireSession(sess *LoginSession) {
+func (m *SessionManager) expireSession(sess *loginSession) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.active == sess && sess.status == SessionStatusPending {
-		sess.status = SessionStatusExpired
+	if m.active == sess && sess.status == sessionPending {
+		sess.status = sessionExpired
+		m.finishSessionLocked(sess, ErrSessionExpired)
 		m.cleanupSessionLocked(sess)
 	}
 }
 
-func (m *SessionManager) failPending(sess *LoginSession) {
+func (m *SessionManager) failPending(sess *loginSession) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.active == sess && sess.status == SessionStatusPending {
-		sess.status = SessionStatusFailed
+	if m.active == sess && sess.status == sessionPending {
+		sess.status = sessionFailed
+		m.finishSessionLocked(sess, errors.New("Google authorization failed"))
 		m.cleanupSessionLocked(sess)
 	}
 }
@@ -270,29 +293,30 @@ func (m *SessionManager) Complete(ctx context.Context, code, state string) (user
 		return UserInfo{}, ErrSessionManagerClosed
 	}
 	sess := m.active
-	if sess == nil || sess.State != state {
+	if sess == nil || sess.state != state {
 		m.mu.Unlock()
 		return UserInfo{}, ErrInvalidState
 	}
-	if sess.status == SessionStatusExchanging {
+	if sess.status == sessionExchanging {
 		m.mu.Unlock()
 		return UserInfo{}, ErrLoginInProgress
 	}
-	if sess.status == SessionStatusExpired {
+	if sess.status == sessionExpired {
 		m.mu.Unlock()
 		return UserInfo{}, ErrSessionExpired
 	}
-	if sess.status != SessionStatusPending {
+	if sess.status != sessionPending {
 		m.mu.Unlock()
 		return UserInfo{}, ErrSessionAlreadyUsed
 	}
-	if !time.Now().Before(sess.ExpiresAt) {
-		sess.status = SessionStatusExpired
+	if !time.Now().Before(sess.expiresAt) {
+		sess.status = sessionExpired
+		m.finishSessionLocked(sess, ErrSessionExpired)
 		m.cleanupSessionLocked(sess)
 		m.mu.Unlock()
 		return UserInfo{}, ErrSessionExpired
 	}
-	sess.status = SessionStatusExchanging
+	sess.status = sessionExchanging
 	m.stopExpiryTimerLocked(sess)
 	m.work.Add(1)
 	m.mu.Unlock()
@@ -301,23 +325,26 @@ func (m *SessionManager) Complete(ctx context.Context, code, state string) (user
 		m.mu.Lock()
 		var committed *config.CommitError
 		if err != nil && !errors.As(err, &committed) {
-			sess.status = SessionStatusFailed
+			sess.status = sessionFailed
 		} else {
-			sess.status = SessionStatusCompleted
+			sess.status = sessionCompleted
 		}
+		m.finishSessionLocked(sess, err)
 		m.cleanupSessionLocked(sess)
 		m.mu.Unlock()
 	}()
-	if err := tokenOverrideError(); err != nil {
-		return UserInfo{}, err
+	if !m.cli {
+		if err := tokenOverrideError(); err != nil {
+			return UserInfo{}, err
+		}
 	}
 	if strings.TrimSpace(code) == "" {
 		return UserInfo{}, errors.New("missing authorization code")
 	}
-	exchangeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	exchangeCtx, cancel := context.WithTimeout(ctx, DefaultHTTPTimeout)
 	stop := context.AfterFunc(m.ctx, cancel)
 	defer func() { stop(); cancel() }()
-	tokens, err := exchangeOAuthCodeWithClient(exchangeCtx, m.client, code, sess.Verifier, sess.RedirectURI, sess.ClientID, sess.ClientSecret)
+	tokens, err := exchangeOAuthCodeWithClient(exchangeCtx, m.client, code, sess.verifier, sess.redirectURI, sess.clientID, sess.clientSecret)
 	if err != nil {
 		return UserInfo{}, err
 	}
@@ -325,8 +352,6 @@ func (m *SessionManager) Complete(ctx context.Context, code, state string) (user
 	if err != nil {
 		return UserInfo{}, err
 	}
-	m.activationMu.Lock()
-	defer m.activationMu.Unlock()
 	m.mu.Lock()
 	closed := m.closed
 	m.mu.Unlock()
@@ -337,14 +362,14 @@ func (m *SessionManager) Complete(ctx context.Context, code, state string) (user
 		return UserInfo{}, err
 	}
 	if m.onConfigured != nil {
-		if err := m.onConfigured(exchangeCtx, tokens, sess.ClientID, sess.ClientSecret, user); err != nil {
+		if err := m.onConfigured(exchangeCtx, tokens, sess.clientID, sess.clientSecret, user); err != nil {
 			return UserInfo{}, fmt.Errorf("activate account: %w", err)
 		}
 	}
 	return user, nil
 }
 
-func (m *SessionManager) stopExpiryTimerLocked(sess *LoginSession) {
+func (m *SessionManager) stopExpiryTimerLocked(sess *loginSession) {
 	if sess.expiryTimer != nil {
 		if sess.expiryTimer.Stop() {
 			m.work.Done()
@@ -355,7 +380,7 @@ func (m *SessionManager) stopExpiryTimerLocked(sess *LoginSession) {
 
 // cleanupSessionLocked releases the listening socket immediately but lets an
 // executing callback deliver its complete response before graceful shutdown.
-func (m *SessionManager) cleanupSessionLocked(sess *LoginSession) {
+func (m *SessionManager) cleanupSessionLocked(sess *loginSession) {
 	m.stopExpiryTimerLocked(sess)
 	if sess.listener != nil {
 		_ = sess.listener.Close()
@@ -367,7 +392,7 @@ func (m *SessionManager) cleanupSessionLocked(sess *LoginSession) {
 		m.work.Add(1)
 		go func() {
 			defer m.work.Done()
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), callbackShutdownTimeout)
 			defer cancel()
 			if err := server.Shutdown(shutdownCtx); err != nil {
 				_ = server.Close()
@@ -376,25 +401,32 @@ func (m *SessionManager) cleanupSessionLocked(sess *LoginSession) {
 	}
 }
 
+func (m *SessionManager) finishSessionLocked(sess *loginSession, err error) {
+	select {
+	case <-sess.done:
+		return
+	default:
+		sess.result = err
+		close(sess.done)
+	}
+}
+
 // Close permanently disables Begin, cancels completion, and joins all owned work.
 func (m *SessionManager) Close() error {
-	m.mu.Lock()
-	if m.closed {
-		done := m.closeDone
+	return m.closer.Close(func() error {
+		m.mu.Lock()
+		m.closed = true
+		m.cancel()
+		if m.active != nil {
+			if m.active.status == sessionPending {
+				m.finishSessionLocked(m.active, ErrSessionManagerClosed)
+			}
+			m.cleanupSessionLocked(m.active)
+		}
 		m.mu.Unlock()
-		<-done
+		// Complete registers work under mu before passing the closed check.
+		// Joining it also joins activation hooks, without a second lock barrier.
+		m.work.Wait()
 		return nil
-	}
-	m.closed = true
-	m.cancel()
-	if m.active != nil {
-		m.cleanupSessionLocked(m.active)
-	}
-	m.mu.Unlock()
-	// No hook can pass the closed check after this lifecycle barrier.
-	m.activationMu.Lock()
-	m.activationMu.Unlock()
-	m.work.Wait()
-	close(m.closeDone)
-	return nil
+	})
 }

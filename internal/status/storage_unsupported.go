@@ -15,11 +15,3 @@ func unsupportedHistoryStorage() error {
 func lockHistoryFile(*os.File) error {
 	return unsupportedHistoryStorage()
 }
-
-func replaceHistoryFile(string, string) error {
-	return unsupportedHistoryStorage()
-}
-
-func syncHistoryDirectory(string) error {
-	return unsupportedHistoryStorage()
-}
