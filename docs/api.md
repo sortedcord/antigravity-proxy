@@ -4,36 +4,59 @@ Antigravity Proxy exposes a native Google Gemini `/v1beta` HTTP interface along 
 
 ## Endpoints Overview
 
+### Data API (Account Key authenticated)
+
 | Method and Path | Description | Authentication |
 |---|---|---|
-| `GET /health` | Health check & credential configuration status | None (Public) |
-| `GET /models` | Raw Cloud Code `fetchAvailableModels` JSON catalog | Local `API_KEY` |
-| `GET /status/limit` | Latest persisted quota snapshot across model pools | Local `API_KEY` |
-| `GET /status/usage` | Historical quota observations with filtering & pagination | Local `API_KEY` |
-| `GET /status/account` | Authenticated Google account details (email, name, subscription tier) | Local `API_KEY` |
-| `GET /config/login` | Initiate runtime OAuth login; returns Google authorization URL | Local `API_KEY` |
-| `POST /config/login` | Complete runtime OAuth login with code/state or redirect URL | Local `API_KEY` |
-| `GET /v1beta/models` | Native Gemini model list with keyset pagination | Local `API_KEY` |
-| `GET /v1beta/models/{id}` | Native Gemini model details | Local `API_KEY` |
-| `POST /v1beta/models/{id}:generateContent` | Native Gemini content generation | Local `API_KEY` |
-| `POST /v1beta/models/{id}:streamGenerateContent?alt=sse` | Native Gemini streaming generation (SSE) | Local `API_KEY` |
+| `GET /health` | Health check & credential presence | None (Public) |
+| `GET /models` | Raw Cloud Code `fetchAvailableModels` JSON catalog | Account `API_KEY` |
+| `GET /status/limit` | Latest persisted quota snapshot for caller's account | Account `API_KEY` |
+| `GET /status/usage` | Historical quota observations for caller's account | Account `API_KEY` |
+| `GET /status/account` | Account details for caller's account | Account `API_KEY` |
+| `GET /v1beta/models` | Native Gemini model list with keyset pagination | Account `API_KEY` |
+| `GET /v1beta/models/{id}` | Native Gemini model details | Account `API_KEY` |
+| `POST /v1beta/models/{id}:generateContent` | Native Gemini content generation | Account `API_KEY` |
+| `POST /v1beta/models/{id}:streamGenerateContent?alt=sse` | Native Gemini streaming generation (SSE) | Account `API_KEY` |
+
+### Admin API (Admin API Key authenticated)
+
+| Method and Path | Description | Authentication |
+|---|---|---|
+| `GET /admin/accounts` | List all configured accounts and statuses | `ADMIN_API_KEY` |
+| `GET /admin/accounts/{id}` | Get account details and subscription | `ADMIN_API_KEY` |
+| `PATCH /admin/accounts/{id}` | Update account label or enabled status | `ADMIN_API_KEY` |
+| `DELETE /admin/accounts/{id}` | Delete account from proxy | `ADMIN_API_KEY` |
+| `POST /admin/login-sessions` | Initiate OAuth login session for an account | `ADMIN_API_KEY` |
+| `GET /admin/login-sessions/{id}` | Get session status & one-time issued key | `ADMIN_API_KEY` |
+| `POST /admin/login-sessions/{id}/complete` | Complete OAuth login session with code/state or redirect URL | `ADMIN_API_KEY` |
+| `GET /admin/accounts/{id}/keys` | List API keys for an account | `ADMIN_API_KEY` |
+| `POST /admin/accounts/{id}/keys` | Create a new API key for an account | `ADMIN_API_KEY` |
+| `DELETE /admin/accounts/{id}/keys/{keyId}` | Revoke an API key | `ADMIN_API_KEY` |
+| `GET /admin/accounts/{id}/quota` | Latest quota snapshot for an account | `ADMIN_API_KEY` |
+| `GET /admin/accounts/{id}/usage` | Historical quota observations for an account | `ADMIN_API_KEY` |
+| `GET /admin/quota` | Multi-account quota overview across all accounts | `ADMIN_API_KEY` |
 
 ---
 
 ## Authentication
 
-When `API_KEY` is set on the server, requests to protected routes must include the key via one of the following methods (evaluated in priority order):
+### Data Routes (`/v1beta/*`, `/models`, `/status/*`)
+Requests to data routes must include an account-scoped API key. The key determines which Google account serves the request. The key can be passed via:
 
-1. `x-goog-api-key: <API_KEY>` (standard Gemini header)
-2. `?key=<API_KEY>` query parameter
-3. `x-api-key: <API_KEY>`
-4. `Authorization: Bearer <API_KEY>`
+1. `x-goog-api-key: <KEY>` (standard Gemini header)
+2. `?key=<KEY>` query parameter
+3. `x-api-key: <KEY>`
+4. `Authorization: Bearer <KEY>`
 
-If no `API_KEY` is configured on the server, API key authentication is disabled for local loopback use. The local API key authenticates clients to the proxy; Google Cloud Code upstream authentication is handled securely by the proxy using its stored Google OAuth credentials.
+If no keys are configured across any account on localhost/loopback and exactly one account is configured, requests are allowed without keys for convenient local development. When multiple accounts are configured, or when listening on non-loopback interfaces, an API key is required.
 
-`/config/login` is an administration exception: the server must have a configured `API_KEY`, even on loopback. Without it, both login methods return `503`; a missing or incorrect request key returns `401`. Use headers rather than URL query parameters, and HTTPS or an encrypted tunnel for remote setup. The same key permits account replacement, so distribute it only to trusted administrators if management routes are reachable.
+### Admin Routes (`/admin/*`)
+Administration routes require the `ADMIN_API_KEY`. It can be passed via headers:
+- `x-goog-api-key: <ADMIN_KEY>`
+- `x-api-key: <ADMIN_KEY>`
+- `Authorization: Bearer <ADMIN_KEY>`
 
-The server may start without Google credentials. Model discovery and generation reject those requests locally with `503` before body reads, generation capacity acquisition, token refresh, project discovery, or Google calls. `/health` stays public and reports local credential presence, not proof that Google credentials remain valid.
+*Note:* URL query parameters (`?key=...`) are explicitly rejected on admin routes to prevent secrets from appearing in URLs or logs. If `ADMIN_API_KEY` is not configured on the server, all `/admin/*` routes return `503 Service Unavailable`.
 
 ---
 
@@ -156,56 +179,44 @@ curl http://127.0.0.1:8080/status/limit \
 {
   "observed_at": "2026-10-07T09:59:38Z",
   "source": "retrieveUserQuotaSummary",
-  "pools": {
-    "gemini": {
-      "id": "gemini",
-      "display_name": "Gemini Models",
-      "five_hour": {
-        "bucket_id": "gemini-5h",
-        "window": "5h",
-        "status": "available",
-        "disabled": false,
-        "remaining_fraction": 0.998,
-        "remaining_percent": 99.8,
-        "used_percent": 0.2,
-        "reset_at": "2026-10-07T12:20:15Z"
-      },
-      "weekly": {
-        "bucket_id": "gemini-weekly",
-        "window": "weekly",
-        "status": "available",
-        "disabled": false,
-        "remaining_fraction": 0.998,
-        "remaining_percent": 99.8,
-        "used_percent": 0.2,
-        "reset_at": "2026-10-11T16:02:27Z"
-      }
+  "buckets": [
+    {
+      "id": "gemini-5h",
+      "pool_display_name": "Gemini Models",
+      "window": "5h",
+      "display_name": "Five Hour Limit Remaining",
+      "status": "available",
+      "remaining_fraction": 0.998,
+      "reset_at": "2026-10-07T12:20:15Z"
     },
-    "third_party": {
-      "id": "third_party",
-      "display_name": "Claude and GPT models",
-      "five_hour": {
-        "bucket_id": "3p-5h",
-        "window": "5h",
-        "status": "available",
-        "disabled": false,
-        "remaining_fraction": 0.931,
-        "remaining_percent": 93.1,
-        "used_percent": 6.9,
-        "reset_at": "2026-10-07T14:18:50Z"
-      },
-      "weekly": {
-        "bucket_id": "3p-weekly",
-        "window": "weekly",
-        "status": "available",
-        "disabled": false,
-        "remaining_fraction": 0.953,
-        "remaining_percent": 95.3,
-        "used_percent": 4.7,
-        "reset_at": "2026-10-13T04:42:09Z"
-      }
+    {
+      "id": "gemini-weekly",
+      "pool_display_name": "Gemini Models",
+      "window": "weekly",
+      "display_name": "Weekly Limit Remaining",
+      "status": "available",
+      "remaining_fraction": 0.998,
+      "reset_at": "2026-10-11T16:02:27Z"
+    },
+    {
+      "id": "3p-5h",
+      "pool_display_name": "Claude and GPT models",
+      "window": "5h",
+      "display_name": "Five Hour Limit Remaining",
+      "status": "available",
+      "remaining_fraction": 0.931,
+      "reset_at": "2026-10-07T14:18:50Z"
+    },
+    {
+      "id": "3p-weekly",
+      "pool_display_name": "Claude and GPT models",
+      "window": "weekly",
+      "display_name": "Weekly Limit Remaining",
+      "status": "available",
+      "remaining_fraction": 0.953,
+      "reset_at": "2026-10-13T04:42:09Z"
     }
-  },
+  ],
   "polling": {
     "interval_seconds": 300,
     "last_attempt_at": "2026-10-07T09:59:37Z",
@@ -270,65 +281,150 @@ Quota observations are stored in account-specific journals with hashed identity 
 
 ---
 
-## Runtime Account Configuration
+## Admin Management API
 
-### `GET /config/login`
+All endpoints under `/admin/*` require the `ADMIN_API_KEY` header (`x-goog-api-key`, `x-api-key`, or `Authorization: Bearer`). If `ADMIN_API_KEY` is not configured, these endpoints return `503`.
 
-Initiates a runtime Google OAuth login session and returns the authorization URL.
+### Account Management
 
-Login sessions use state validation and PKCE and expire after five minutes. Repeated GET requests reuse a pending attempt; completion already in progress returns `409`. Abandoned, failed, expired, and completed attempts release their callback listeners. Failed attempts are terminal: start a new GET instead of replaying a consumed code. Unsupported methods return `405`.
+#### `GET /admin/accounts`
+Lists all accounts configured on the proxy, including status and live quota observations.
 
-**Example:**
-```sh
-curl http://127.0.0.1:8080/config/login \
-  -H "x-goog-api-key: $API_KEY"
+**Response:**
+```json
+[
+  {
+    "id": "work",
+    "label": "Work Account",
+    "email": "work@example.com",
+    "name": "Work Developer",
+    "enabled": true,
+    "credential_configured": true,
+    "key_count": 2,
+    "quota": { ... },
+    "polling": { ... }
+  }
+]
 ```
+
+#### `GET /admin/accounts/{id}`
+Returns details for a single account including its active subscription tier. Returns `404` if not found.
+
+#### `PATCH /admin/accounts/{id}`
+Updates an account's display label or enabled status. Disabled accounts immediately reject their API keys with `403 PERMISSION_DENIED`, prompting AI gateways like Bifrost to rotate to the next key.
+
+**Request Body:**
+```json
+{
+  "label": "New Label",
+  "enabled": false
+}
+```
+
+#### `DELETE /admin/accounts/{id}`
+Permanently removes the account and its associated API keys from the configuration. Retains historical quota journals on disk. Returns `204 No Content`.
+
+---
+
+### OAuth Login Sessions
+
+#### `POST /admin/login-sessions`
+Initiates a Google OAuth authorization session. Accepts optional target account ID, replace flag, and key issuance specification.
+
+**Request Body:**
+```json
+{
+  "account": "work",
+  "replace": false,
+  "issue_key": "bifrost"
+}
+```
+
+| Field | Description |
+|---|---|
+| `account` | Target account slug (`a-z0-9-`). If omitted, matches an existing account with the same Google ID or derives a slug from email. |
+| `replace` | Set `true` to allow re-linking an existing account ID to a different Google account. Otherwise returns `409` on identity mismatch. |
+| `issue_key` | Optional key label. When set, automatically mints a new API key upon successful login. |
 
 **Response Format:**
 ```json
 {
+  "id": "ls_7f8a9b0c1d2e3f4a",
   "login_url": "https://accounts.google.com/o/oauth2/v2/auth?...",
-  "expires_at": "2026-10-07T16:30:00Z"
+  "expires_at": "2026-10-13T16:30:00Z"
 }
 ```
 
-Open the `login_url` value without surrounding JSON quotes. To extract a plain URL with `jq`:
-```sh
-curl -sS http://127.0.0.1:8080/config/login \
-  -H "x-goog-api-key: $API_KEY" | jq -r '.login_url'
-```
-
-The response preserves literal `&` query separators for directly opening the link. If another client displays them as JSON escapes such as `\u0026`, decode the JSON first; those escapes are not URL separators and can cause Google's `Required parameter is missing: response_type` error.
-
-### `POST /config/login`
-
-Completes runtime Google OAuth login. When authenticating from a browser on a different machine, the user can submit the authorization code and state (or the full redirected URL) from the browser address bar.
-
-On the browser's machine, `127.0.0.1` refers to that machine, not a remote proxy or container. When the loopback redirect cannot connect, copy its URL from the address bar and submit it to the proxy. An SSH tunnel can instead deliver the callback automatically. POST exchanges and persists credentials on the proxy, then publishes a new complete account snapshot; the old account remains usable until this commit. Existing automatic token refresh is preserved.
-
-Use either `code` plus `state`, or the `url` field. Do not combine them. The JSON body is bounded to 64 KiB. Identity, history preparation, or credential-save failure before commit leaves the old account and saved credentials intact. Invalid state returns `400`; expired state `410`; replay or concurrent completion `409`; Google exchange/profile failures `502`; local preparation/save failures `500`.
-
-If file replacement succeeds but directory sync fails, POST returns `500` with `credential_configured: true` and `durability_uncertain: true`. The live account matches the replacement on disk; this is not an unchanged-account failure. The response contains no tokens or filesystem causes. Start a fresh login/save to confirm durability.
-
-**Payload Options:**
-```json
-{
-  "code": "4/0A...",
-  "state": "a1b2..."
-}
-```
-or with the full redirect URL:
-```json
-{
-  "url": "http://127.0.0.1:51121/oauth-callback?state=a1b2...&code=4/0A..."
-}
-```
+#### `GET /admin/login-sessions/{id}`
+Checks the status of an ongoing or completed session. If the login completed via the loopback callback with `issue_key` requested, the newly minted API key secret is returned **once** on the first call to this endpoint and then permanently erased from memory.
 
 **Response Format:**
 ```json
 {
-  "status": "configured",
+  "id": "ls_7f8a9b0c1d2e3f4a",
+  "status": "completed",
+  "account_id": "work",
   "email": "developer@example.com",
-  "name": "Example Developer"
+  "name": "Example Developer",
+  "key": {
+    "id": "key_3f9a1c2e",
+    "label": "bifrost",
+    "secret": "agp_7x9k2m..."
+  }
 }
 ```
+
+#### `POST /admin/login-sessions/{id}/complete`
+Manually completes authorization when the browser cannot reach the local loopback callback port (e.g., remote Docker container). Submits `code` and `state`, or the full callback `url`. If `issue_key` was requested at session creation, the response returns the secret key directly.
+
+---
+
+### API Key Management
+
+#### `GET /admin/accounts/{id}/keys`
+Lists all API keys configured for an account. Never exposes key secrets or hashes.
+
+**Response:**
+```json
+[
+  {
+    "id": "key_3f9a1c2e",
+    "label": "bifrost",
+    "last4": "2m3f",
+    "created_at": "2026-10-13T12:00:00Z",
+    "last_used_at": "2026-10-13T12:15:30Z"
+  }
+]
+```
+
+#### `POST /admin/accounts/{id}/keys`
+Mints a new cryptographically secure API key for the account. Displays the plaintext secret key once.
+
+**Request Body:**
+```json
+{
+  "label": "open-webui"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "key_8b2c4d6f",
+  "label": "open-webui",
+  "key": "agp_k9x2m4p7..."
+}
+```
+
+#### `DELETE /admin/accounts/{id}/keys/{keyId}`
+Revokes an API key. Requests using this key immediately fail with `401 Unauthorized`. Returns `204 No Content`.
+
+---
+
+### Multi-Account Quota Overview
+
+#### `GET /admin/quota`
+Returns live quota snapshot across all configured accounts in a single call.
+
+#### `GET /admin/accounts/{id}/quota` and `GET /admin/accounts/{id}/usage`
+Inspects live bucket limits and historical observations for a specific account without requiring that account's API key.

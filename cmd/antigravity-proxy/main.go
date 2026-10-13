@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"antigravity-proxy/internal/config"
-	"antigravity-proxy/internal/oauth"
 	"antigravity-proxy/internal/proxy"
 )
 
@@ -42,7 +41,7 @@ func run(args []string, output io.Writer) error {
 				variables[i] += fmt.Sprintf(" (default %v)", value)
 			}
 		}
-		fmt.Fprintf(output, "Antigravity Proxy\n\nUsage:\n  antigravity-proxy [serve]\n  antigravity-proxy login\n\nEnvironment:\n  %s\n", strings.Join(variables, "\n  "))
+		fmt.Fprintf(output, "Antigravity Proxy\n\nUsage:\n  antigravity-proxy [serve]\n  antigravity-proxy login [--account ID] [--replace] [--issue-key LABEL]\n  antigravity-proxy accounts <list|enable|disable|remove> [ID]\n  antigravity-proxy keys <list|create|revoke> <ACCOUNT_ID> [KEY_ID] [--label LABEL]\n  antigravity-proxy admin-key rotate\n\nEnvironment:\n  %s\n", strings.Join(variables, "\n  "))
 
 		return nil
 	}
@@ -53,13 +52,19 @@ func run(args []string, output io.Writer) error {
 	if len(args) > 0 {
 		switch args[0] {
 		case "login":
-			return oauth.Login(cfg, path)
+			return runLoginCommand(args[1:], cfg, path, output)
+		case "accounts":
+			return runAccountsCommand(args[1:], cfg, path, output)
+		case "keys":
+			return runKeysCommand(args[1:], cfg, path, output)
+		case "admin-key":
+			return runAdminKeyCommand(args[1:], path, output)
 		case "serve":
 		default:
 			return fmt.Errorf("unknown command %q (use --help)", args[0])
 		}
 	}
-	if cfg.AccessToken == "" && cfg.RefreshToken == "" {
+	if !cfg.HasCredentials() {
 		slog.Info("No Google credential configured; run `antigravity-proxy login` or set ANTIGRAVITY_ACCESS_TOKEN")
 	}
 	return serve(cfg, path)

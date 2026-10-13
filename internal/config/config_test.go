@@ -3,10 +3,12 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 
+	"antigravity-proxy/internal/apikey"
 	"antigravity-proxy/internal/testutil"
 )
 
@@ -276,7 +278,7 @@ func TestSaveQuotaConfigurationRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded != cfg || loadedPath != path {
+	if !reflect.DeepEqual(loaded, cfg) || loadedPath != path {
 		t.Fatal("saved quota configuration did not round-trip")
 	}
 	data, err := os.ReadFile(path)
@@ -389,5 +391,156 @@ func TestLoadExplicitAccessTokenBypassesPartialOAuthEnvironment(t *testing.T) {
 				t.Fatal("deferred OAuth use accepted the partial environment pair")
 			}
 		})
+	}
+}
+
+func TestUpdateCredentialsMatchesDefaultExplicitly(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "config.json")
+	initial := Config{
+		Host: "127.0.0.1",
+		Accounts: []Account{
+			{
+				ID:      "work",
+				Label:   "Work",
+				Enabled: true,
+				Keys:    []AccountKey{{ID: "key_work", Hash: apikey.Hash("work-key"), Last4: "-key"}},
+			},
+			{
+				ID:      "default",
+				Label:   "Default",
+				Enabled: true,
+			},
+		},
+		QuotaPollIntervalSeconds: 300,
+		QuotaHistoryPath:         filepath.Join(home, "usage.jsonl"),
+		QuotaHistoryMaxSamples:   100,
+	}
+	if err := Save(path, initial); err != nil {
+		t.Fatal(err)
+	}
+
+	creds := Credentials{
+		AccessToken: "new-token",
+		AccountID:   "", // Unidentified credentials
+	}
+	if err := UpdateCredentials(path, creds); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := ReadDiskAccounts(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated) != 2 {
+		t.Fatalf("expected 2 accounts, got %d", len(updated))
+	}
+	// "work" should remain untouched
+	if updated[0].AccessToken != "" {
+		t.Fatalf("work account was erroneously modified: %+v", updated[0])
+	}
+	// "default" should have the new credentials
+	if updated[1].AccessToken != "new-token" {
+		t.Fatalf("default account was not updated: %+v", updated[1])
+	}
+}
+
+func TestUpdateCredentialsDoesNotOverwriteSingleNonDefaultAccount(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "config.json")
+	initial := Config{
+		Host: "127.0.0.1",
+		Accounts: []Account{
+			{
+				ID:           "work",
+				Label:        "Work",
+				Enabled:      true,
+				AccessToken:  "work-token",
+				AccountID:    "google-work-id",
+				AccountEmail: "work@example.com",
+				Keys:         []AccountKey{{ID: "key_work", Hash: apikey.Hash("work-key"), Last4: "-key"}},
+			},
+		},
+		QuotaPollIntervalSeconds: 300,
+		QuotaHistoryPath:         filepath.Join(home, "usage.jsonl"),
+		QuotaHistoryMaxSamples:   100,
+	}
+	if err := Save(path, initial); err != nil {
+		t.Fatal(err)
+	}
+
+	creds := Credentials{
+		AccessToken: "unidentified-token",
+		AccountID:   "", // Unidentified credentials
+	}
+	if err := UpdateCredentials(path, creds); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := ReadDiskAccounts(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated) != 2 {
+		t.Fatalf("expected 2 accounts, got %d", len(updated))
+	}
+	// "work" must remain untouched
+	if updated[0].ID != "work" || updated[0].AccessToken != "work-token" || updated[0].AccountID != "google-work-id" {
+		t.Fatalf("work account was erroneously overwritten: %+v", updated[0])
+	}
+	// "default" must have the new credentials
+	if updated[1].ID != "default" || updated[1].AccessToken != "unidentified-token" {
+		t.Fatalf("default account was not created with credentials: %+v", updated[1])
+	}
+}
+
+func TestApplyEnvironmentLayerContract(t *testing.T) {
+	// 1. Without Env flags set, existing account OAuth and ProjectID are preserved
+	cfg := Config{
+		OAuthClientID: "legacy-client",
+		ProjectID:     "legacy-project",
+	}
+	accounts := []Account{
+		{
+			ID:            "default",
+			Label:         "Default",
+			Enabled:       true,
+			OAuthClientID: "active-client",
+			ProjectID:     "active-project",
+		},
+	}
+	result := cfg.ApplyEnvironmentLayer(accounts)
+	if result[0].OAuthClientID != "active-client" {
+		t.Fatalf("ApplyEnvironmentLayer overwrote OAuth client without Env flag: got %q, want active-client", result[0].OAuthClientID)
+	}
+	if result[0].ProjectID != "active-project" {
+		t.Fatalf("ApplyEnvironmentLayer overwrote ProjectID without Env flag: got %q, want active-project", result[0].ProjectID)
+	}
+
+	// 2. With Env flags set, environment values override default account
+	cfg.Env = EnvOverrides{
+		HasOAuth:          true,
+		OAuthClientID:     "env-client",
+		OAuthClientSecret: "env-secret",
+		HasProjectID:      true,
+		ProjectID:         "env-project",
+		HasAPIKey:         true,
+		APIKey:            "env-api-key",
+	}
+	overridden := cfg.ApplyEnvironmentLayer(accounts)
+	if overridden[0].OAuthClientID != "env-client" {
+		t.Fatalf("ApplyEnvironmentLayer did not apply env OAuth client: got %q", overridden[0].OAuthClientID)
+	}
+	if overridden[0].ProjectID != "active-project" { // ProjectID override only applies when empty
+		t.Fatalf("ApplyEnvironmentLayer overwrote non-empty ProjectID: got %q", overridden[0].ProjectID)
+	}
+
+	emptyProj := []Account{{ID: "default", Enabled: true}}
+	overriddenEmpty := cfg.ApplyEnvironmentLayer(emptyProj)
+	if overriddenEmpty[0].ProjectID != "env-project" {
+		t.Fatalf("ApplyEnvironmentLayer did not apply env ProjectID to empty account: got %q", overriddenEmpty[0].ProjectID)
+	}
+	if len(overriddenEmpty[0].Keys) != 1 || overriddenEmpty[0].Keys[0].ID != "key_env" {
+		t.Fatalf("ApplyEnvironmentLayer did not attach env API key: %+v", overriddenEmpty[0].Keys)
 	}
 }

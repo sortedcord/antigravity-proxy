@@ -4,12 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"antigravity-proxy/internal/quota"
 )
 
-// Query selects observation times inclusively and pages flattened quota windows.
+// Query selects observation times inclusively and pages flattened quota buckets.
 // Zero-valued fields use the documented defaults. Fix To while paging if new
 // observations must not shift the selected time range. Count-based retention
 // may still evict older appends, even when their observation times are newer.
@@ -23,13 +24,11 @@ type Query struct {
 	Order  string
 }
 
-// Entry is one quota window at one observation, retaining unavailable and
+// Entry is one quota bucket at one observation, retaining unavailable and
 // disabled states separately from an authoritative available zero.
 type Entry struct {
-	ObservedAt      time.Time `json:"observed_at"`
-	Pool            string    `json:"pool"`
-	PoolDisplayName string    `json:"pool_display_name"`
-	quota.Window
+	ObservedAt time.Time `json:"observed_at"`
+	quota.Bucket
 }
 
 // Result contains a bounded page and a total calculated before pagination.
@@ -46,10 +45,9 @@ type Result struct {
 	Window     string     `json:"window"`
 }
 
-// History returns independent entries ordered by observation time. Within each
-// observation, ties are Gemini before third-party and five-hour before weekly,
-// even for descending queries. Equal-time records use oldest append first for
-// asc and newest append first for desc. Only the requested page is copied.
+// History returns independent entries ordered by observation time.
+// Equal-time records use oldest append first for asc and newest append first for desc.
+// Only the requested page is copied.
 func (c *Collector) History(query Query) (Result, error) {
 	if query.Pool == "" {
 		query.Pool = "all"
@@ -71,20 +69,7 @@ func (c *Collector) History(query Query) (Result, error) {
 		Order: query.Order, From: cloneTime(query.From), To: cloneTime(query.To),
 		Pool: query.Pool, Window: query.Window,
 	}
-	// Canonical slots: Gemini five-hour, Gemini weekly, third-party five-hour,
-	// third-party weekly. A fixed array avoids allocating all filtered entries.
-	var slots [4]int
-	selected := 0
-	for slot := range 4 {
-		if query.Pool == quota.GeminiPool && slot >= 2 || query.Pool == quota.ThirdPartyPool && slot < 2 {
-			continue
-		}
-		if query.Window == quota.FiveHourWindow && slot%2 != 0 || query.Window == quota.WeeklyWindow && slot%2 != 1 {
-			continue
-		}
-		slots[selected] = slot
-		selected++
-	}
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	first, last := 0, len(c.ordered)
@@ -98,27 +83,77 @@ func (c *Collector) History(query Query) (Result, error) {
 			return c.samples[c.ordered[i]].ObservedAt.After(*result.To)
 		})
 	}
-	result.Total = (last - first) * selected
+
+	matchBucket := func(b quota.Bucket) bool {
+		if query.Pool != "all" {
+			p := strings.ToLower(query.Pool)
+			if p == "gemini" && !strings.HasPrefix(b.ID, "gemini-") {
+				return false
+			}
+			if (p == "third_party" || p == "3p") && !strings.HasPrefix(b.ID, "3p-") {
+				return false
+			}
+			if p != "gemini" && p != "third_party" && p != "3p" && !strings.EqualFold(b.PoolDisplayName, query.Pool) {
+				return false
+			}
+		}
+		if query.Window != "all" && b.Window != query.Window {
+			return false
+		}
+		return true
+	}
+
+	total := 0
+	for i := first; i < last; i++ {
+		sample := &c.samples[c.ordered[i]]
+		for _, b := range sample.Buckets {
+			if matchBucket(b) {
+				total++
+			}
+		}
+	}
+	result.Total = total
 	if query.Offset >= result.Total {
 		return result, nil
 	}
+
 	count := result.Total - query.Offset
 	if count > query.Limit {
 		count = query.Limit
 	}
 	result.Entries = make([]Entry, 0, count)
-	for flat := query.Offset; flat < query.Offset+count; flat++ {
-		position := first + flat/selected
-		if query.Order == "desc" {
-			position = last - 1 - flat/selected
+
+	current := 0
+	collectSample := func(sample *quota.Snapshot) {
+		for _, b := range sample.Buckets {
+			if matchBucket(b) {
+				if current >= query.Offset && len(result.Entries) < count {
+					result.Entries = append(result.Entries, Entry{
+						ObservedAt: sample.ObservedAt,
+						Bucket:     b.Clone(),
+					})
+				}
+				current++
+			}
 		}
-		sample := &c.samples[c.ordered[position]]
-		slot := slots[flat%selected]
-		bucket := sample.Buckets()[slot]
-		result.Entries = append(result.Entries, Entry{
-			ObservedAt: sample.ObservedAt, Pool: bucket.Pool.ID, PoolDisplayName: bucket.Pool.DisplayName, Window: bucket.Window.Clone(),
-		})
 	}
+
+	if query.Order == "desc" {
+		for i := last - 1; i >= first; i-- {
+			collectSample(&c.samples[c.ordered[i]])
+			if len(result.Entries) == count {
+				break
+			}
+		}
+	} else {
+		for i := first; i < last; i++ {
+			collectSample(&c.samples[c.ordered[i]])
+			if len(result.Entries) == count {
+				break
+			}
+		}
+	}
+
 	if count < result.Total-query.Offset {
 		next := query.Offset + count
 		result.NextOffset = &next
@@ -129,10 +164,10 @@ func (c *Collector) History(query Query) (Result, error) {
 // Validate checks filters without applying defaults. This keeps explicit HTTP
 // limit=0 invalid while allowing zero-value programmatic queries to default.
 func (query Query) Validate() error {
-	if query.Pool != "all" && query.Pool != quota.GeminiPool && query.Pool != quota.ThirdPartyPool {
+	if query.Pool != "all" && query.Pool != "gemini" && query.Pool != "third_party" && query.Pool != "" {
 		return fmt.Errorf("invalid quota pool %q", query.Pool)
 	}
-	if query.Window != "all" && query.Window != quota.FiveHourWindow && query.Window != quota.WeeklyWindow {
+	if query.Window != "all" && query.Window != "5h" && query.Window != "weekly" && query.Window != "" {
 		return fmt.Errorf("invalid quota window %q", query.Window)
 	}
 	if query.Limit < 1 || query.Limit > 1000 {

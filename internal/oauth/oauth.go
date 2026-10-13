@@ -18,7 +18,9 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
+	"antigravity-proxy/internal/apikey"
 	"antigravity-proxy/internal/config"
 )
 
@@ -86,7 +88,13 @@ func listenOAuthCallbackPort() (net.Listener, int, error) {
 // Saved pairs are not reused for login. The selected pair is saved only after
 // successful authorization.
 func Login(cfg config.Config, path string) error {
-	return login(cfg, path, os.Stdout)
+	return LoginWithOptions(cfg, path, SessionOptions{})
+}
+
+// LoginWithOptions authorizes Google credentials through a loopback callback using PKCE
+// and state validation with custom session options, then saves them to path.
+func LoginWithOptions(cfg config.Config, path string, opts SessionOptions) error {
+	return loginWithOptions(cfg, path, os.Stdout, opts, nil)
 }
 
 func login(cfg config.Config, path string, output io.Writer) error {
@@ -94,24 +102,135 @@ func login(cfg config.Config, path string, output io.Writer) error {
 }
 
 func loginWithClient(cfg config.Config, path string, output io.Writer, client *http.Client) error {
-	manager := NewSessionManagerWithClient(client, func(ctx context.Context, tokens Tokens, id, secret string, user UserInfo) error {
+	return loginWithOptions(cfg, path, output, SessionOptions{}, client)
+}
+
+func loginWithOptions(cfg config.Config, path string, output io.Writer, opts SessionOptions, client *http.Client) error {
+	manager := NewSessionManagerWithOptions(client, func(ctx context.Context, sessionOpts SessionOptions, tokens Tokens, clientID, clientSecret string, user UserInfo) (AccountConfigResult, error) {
 		if err := ctx.Err(); err != nil {
-			return err
+			return AccountConfigResult{}, err
 		}
-		if err := saveLoginTokens(path, tokens, id, secret, user); err != nil {
-			return err
+		var mintedSecret, mintedKeyID string
+		var newKey *config.AccountKey
+		if sessionOpts.IssueKey != "" {
+			var genErr error
+			mintedSecret, genErr = apikey.Generate()
+			if genErr != nil {
+				return AccountConfigResult{}, genErr
+			}
+			mintedKeyID, genErr = apikey.GenerateID()
+			if genErr != nil {
+				return AccountConfigResult{}, genErr
+			}
+			newKey = &config.AccountKey{
+				ID:        mintedKeyID,
+				Label:     sessionOpts.IssueKey,
+				Hash:      apikey.Hash(mintedSecret),
+				Last4:     apikey.Last4(mintedSecret),
+				CreatedAt: time.Now().UTC(),
+			}
+		}
+
+		if sessionOpts.AccountID != "" || sessionOpts.IssueKey != "" || len(cfg.Accounts) > 0 {
+			targetID := sessionOpts.AccountID
+			accessToken := ""
+			if tokens.RefreshToken == "" {
+				accessToken = tokens.AccessToken
+			}
+
+			err := config.UpdateAccounts(path, func(accounts *[]config.Account) error {
+				if targetID == "" {
+					for _, da := range *accounts {
+						if da.AccountID == user.ID {
+							targetID = da.ID
+							break
+						}
+					}
+					if targetID == "" {
+						existingIDs := make([]string, 0, len(*accounts))
+						for _, da := range *accounts {
+							existingIDs = append(existingIDs, da.ID)
+						}
+						targetID = config.DeriveAccountID(user.Email, existingIDs)
+					}
+				}
+
+				for _, da := range *accounts {
+					if da.AccountID == user.ID && da.ID != targetID {
+						return ErrGoogleAccountAlreadyLinked
+					}
+					if da.ID == targetID && da.AccountID != "" && da.AccountID != user.ID && !sessionOpts.Replace {
+						return ErrAccountIdentityMismatch
+					}
+				}
+
+				found := false
+				for i := range *accounts {
+					if (*accounts)[i].ID == targetID {
+						found = true
+						(*accounts)[i].ApplyCredentials(config.Credentials{
+							AccessToken:       accessToken,
+							RefreshToken:      tokens.RefreshToken,
+							OAuthClientID:     clientID,
+							OAuthClientSecret: clientSecret,
+							AccountID:         user.ID,
+							AccountEmail:      user.Email,
+							AccountName:       user.Name,
+						})
+						if newKey != nil {
+							(*accounts)[i].Keys = append((*accounts)[i].Keys, *newKey)
+						}
+						return nil
+					}
+				}
+				if !found {
+					var keys []config.AccountKey
+					if newKey != nil {
+						keys = append(keys, *newKey)
+					}
+					newAcc := config.Account{
+						ID:      targetID,
+						Label:   targetID,
+						Enabled: true,
+						Keys:    keys,
+					}
+					newAcc.ApplyCredentials(config.Credentials{
+						AccessToken:       accessToken,
+						RefreshToken:      tokens.RefreshToken,
+						OAuthClientID:     clientID,
+						OAuthClientSecret: clientSecret,
+						AccountID:         user.ID,
+						AccountEmail:      user.Email,
+						AccountName:       user.Name,
+					})
+					*accounts = append(*accounts, newAcc)
+				}
+				return nil
+			})
+			if err != nil {
+				return AccountConfigResult{}, err
+			}
+			fmt.Fprintf(output, "Authorization saved for account %q (%s) to %s\n", targetID, user.Email, path)
+			if mintedSecret != "" {
+				fmt.Fprintf(output, "\nNew API key generated:\n  Key:   %s\n  ID:    %s\n  Label: %s\n\nSave this key now - it cannot be displayed again.\n", mintedSecret, mintedKeyID, sessionOpts.IssueKey)
+			}
+			return AccountConfigResult{AccountID: targetID, KeyID: mintedKeyID, KeySecret: mintedSecret}, nil
+		}
+
+		if err := saveLoginTokens(path, tokens, clientID, clientSecret, user); err != nil {
+			return AccountConfigResult{}, err
 		}
 		if tokens.RefreshToken == "" {
 			fmt.Fprintln(output, "Warning: Google did not return a refresh token; the saved access token expires.")
 		}
 		fmt.Fprintf(output, "Authorization saved to %s\n", path)
-		return nil
+		return AccountConfigResult{AccountID: "default"}, nil
 	})
 	manager.cli = true
 	defer manager.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), sessionLifetime)
 	defer cancel()
-	address, _, err := manager.Begin(ctx)
+	info, err := manager.BeginWithOptions(ctx, opts)
 	if err != nil {
 		return err
 	}
@@ -121,7 +240,7 @@ func loginWithClient(cfg config.Config, path string, output io.Writer, client *h
 	if cfg.OAuthClientID != "" && cfg.OAuthClientID != session.clientID {
 		fmt.Fprintln(output, "Authorizing with the consumer OAuth client; existing credentials remain unchanged until login succeeds.")
 	}
-	fmt.Fprintf(output, "Open this URL to authorize Antigravity Proxy:\n\n%s\n\nWaiting for the local callback...\n", address)
+	fmt.Fprintf(output, "Open this URL to authorize Antigravity Proxy:\n\n%s\n\nWaiting for the local callback...\n", info.AuthURL)
 	select {
 	case <-session.done:
 		return session.result

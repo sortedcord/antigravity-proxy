@@ -292,7 +292,7 @@ func TestHistoryRetentionDefaultsAndServiceConfiguration(t *testing.T) {
 					if order == "desc" {
 						index = len(want) - 1
 					}
-					page, err := collector.History(Query{Pool: quota.GeminiPool, Window: quota.FiveHourWindow, Order: order, Limit: 1})
+					page, err := collector.History(Query{Pool: "gemini", Window: "5h", Order: order, Limit: 1})
 					if err != nil || page.Total != test.retained || !reflect.DeepEqual(page.Entries, allEntries(want[index])[:1]) {
 						t.Fatalf("%s retention query = %+v, %v", order, page, err)
 					}

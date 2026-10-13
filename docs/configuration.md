@@ -19,14 +19,30 @@ On Unix systems, this file must have owner-only permissions (`chmod 600`). The p
 {
   "host": "127.0.0.1",
   "port": 8080,
-  "apiKey": "",
-  "refreshToken": "",
-  "oauthClientId": "",
-  "oauthClientSecret": "",
-  "accountId": "",
-  "accountEmail": "",
-  "accountName": "",
-  "projectId": "",
+  "adminKeyHash": "sha256:d8a2...3f1c",
+  "accounts": [
+    {
+      "id": "work",
+      "label": "Work Account",
+      "enabled": true,
+      "refreshToken": "1//04...",
+      "oauthClientId": "107100...",
+      "oauthClientSecret": "GOCSPX-...",
+      "accountId": "1123456789...",
+      "accountEmail": "developer@company.com",
+      "accountName": "Jane Developer",
+      "projectId": "",
+      "keys": [
+        {
+          "id": "key_3f9a1c2e",
+          "label": "bifrost",
+          "hash": "sha256:4b8e...",
+          "last4": "2m3f",
+          "createdAt": "2026-10-13T12:00:00Z"
+        }
+      ]
+    }
+  ],
   "clientVersion": "1.15.8",
   "maxConcurrentGenerations": 2,
   "quotaPollIntervalSeconds": 300,
@@ -37,11 +53,11 @@ On Unix systems, this file must have owner-only permissions (`chmod 600`). The p
 }
 ```
 
-Login writes `accountId`, `accountEmail`, and `accountName` together with the credential set. Keep these managed fields paired with their tokens; runtime replacement updates them atomically and never persists listener defaults or environment overrides. Token environment variables, including explicit empty values, clear saved profile attribution in the effective configuration. Remove token overrides to use `/config/login`.
-
-`quotaHistoryPath` is the journal base name. The runtime derives an owner-only journal with a stable hashed Google-account namespace; relogin to the same account and restart retain that account's observations. Unattributed legacy journals stay untouched. Credentials without identity are resolved read-only; unresolved credential sets do not fetch quota or expose another account's journal.
-
-`/config/login` requires a configured `API_KEY` even on loopback, and its credential configuration directory must be writable. Static read-only configuration mounts remain supported for preconfigured deployments, but cannot persist runtime login.
+### Migration from Single-Account Configurations
+Antigravity Proxy automatically migrates existing single-account configurations on load. If your configuration file contains flat `refreshToken`, `apiKey`, and `accountId` fields without an `accounts` array:
+- It is converted in-memory into a single account named `default`.
+- Your existing `apiKey` becomes its first key (`key_legacy`).
+- The next administrative update (e.g. adding a new account, rotating keys) rewrites the file in the new multi-account format and strips the legacy flat fields.
 
 ---
 
@@ -53,7 +69,8 @@ Every setting can be specified or overridden using environment variables:
 |---|---|---|
 | `HOST` | Network interface to bind to (`127.0.0.1`, `0.0.0.0`, etc.) | `127.0.0.1` (Binary) / `0.0.0.0` (Docker) |
 | `PORT` | Listening port for the HTTP server | `8080` |
-| `API_KEY` | Proxy client authentication key. **Required** if `HOST` is non-loopback. | Unset |
+| `ADMIN_API_KEY` | Secret key for `/admin/*` management routes and CLI | Unset |
+| `API_KEY` | Legacy/default account client authentication key | Unset |
 | `ANTIGRAVITY_ACCESS_TOKEN` | Direct short-lived Google access token (bypasses OAuth refresh) | Unset |
 | `ANTIGRAVITY_REFRESH_TOKEN` | Google OAuth refresh token | Saved in config |
 | `ANTIGRAVITY_OAUTH_CLIENT_ID` | OAuth Client ID paired with the refresh token | Auto-discovered / Saved |

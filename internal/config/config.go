@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"antigravity-proxy/internal/apikey"
 	"antigravity-proxy/internal/atomicfile"
 )
 
@@ -40,11 +41,36 @@ const DefaultClientVersion = "1.15.8"
 // DefaultMaxConcurrentGenerations bounds generation requests held in memory.
 const DefaultMaxConcurrentGenerations = 2
 
+// EnvOverrides records which values were explicitly set via environment variables.
+type EnvOverrides struct {
+	APIKey            string
+	AccessToken       string
+	RefreshToken      string
+	OAuthClientID     string
+	OAuthClientSecret string
+	ProjectID         string
+	HasAPIKey         bool
+	HasTokens         bool
+	HasOAuth          bool
+	HasProjectID      bool
+}
+
 // Config holds listener settings, client authentication, Google credentials,
 // Antigravity project and endpoint settings, and quota polling settings.
 type Config struct {
 	Port int    `json:"port"`
 	Host string `json:"host"`
+	// AdminKeyHash stores the sha256 hash of ADMIN_API_KEY.
+	AdminKeyHash string `json:"adminKeyHash,omitempty"`
+	// Accounts holds configured accounts.
+	Accounts []Account `json:"accounts,omitempty"`
+
+	// AdminAPIKey is the in-memory admin key populated from the ADMIN_API_KEY environment variable.
+	AdminAPIKey string `json:"-"`
+	// Env records environment-provided overrides distinct from file-persisted values.
+	Env EnvOverrides `json:"-"`
+
+	// Legacy fields kept for backward-compatible disk loading and migration:
 	// APIKey authenticates proxy clients, not requests to Google.
 	APIKey string `json:"apiKey,omitempty"`
 	// AccessToken takes precedence over RefreshToken and is not refreshed.
@@ -70,6 +96,19 @@ type Config struct {
 	ClientVersion string `json:"clientVersion,omitempty"`
 	// MaxConcurrentGenerations bounds simultaneously processed generation requests.
 	MaxConcurrentGenerations int `json:"maxConcurrentGenerations,omitempty"`
+}
+
+// HasCredentials returns true if credentials are configured at top-level or on any account.
+func (cfg Config) HasCredentials() bool {
+	if cfg.AccessToken != "" || cfg.RefreshToken != "" {
+		return true
+	}
+	for _, a := range cfg.Accounts {
+		if a.AccessToken != "" || a.RefreshToken != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // Credentials is a complete token, OAuth client, and account identity replacement.
@@ -134,6 +173,12 @@ func defaults(home string) Config {
 }
 
 func (cfg *Config) applyEnvironment() error {
+	if adminKey := os.Getenv("ADMIN_API_KEY"); adminKey != "" {
+		cfg.AdminAPIKey = adminKey
+		if cfg.AdminKeyHash == "" {
+			cfg.AdminKeyHash = apikey.Hash(adminKey)
+		}
+	}
 	envString("HOST", &cfg.Host)
 	if value := os.Getenv("PORT"); value != "" {
 		port, err := strconv.Atoi(value)
@@ -187,6 +232,28 @@ func (cfg *Config) applyEnvironment() error {
 		}
 	}
 	envString("ANTIGRAVITY_CLIENT_VERSION", &cfg.ClientVersion)
+
+	if apiKey, ok := os.LookupEnv("API_KEY"); ok && apiKey != "" {
+		cfg.Env.HasAPIKey = true
+		cfg.Env.APIKey = apiKey
+	}
+	if accessSet || refreshSet {
+		cfg.Env.HasTokens = true
+		cfg.Env.AccessToken = cfg.AccessToken
+		cfg.Env.RefreshToken = cfg.RefreshToken
+	}
+	if id, secret, provided := oauthEnvironmentPair(); provided {
+		cfg.Env.HasOAuth = true
+		cfg.Env.OAuthClientID = id
+		cfg.Env.OAuthClientSecret = secret
+	}
+	if project, ok := os.LookupEnv("ANTIGRAVITY_PROJECT_ID"); ok && project != "" {
+		cfg.Env.HasProjectID = true
+		cfg.Env.ProjectID = project
+	}
+
+	cfg.Accounts = cfg.ApplyEnvironmentLayer(cfg.Accounts)
+
 	return nil
 }
 
@@ -199,6 +266,8 @@ func (cfg *Config) normalize() {
 		cfg.Host = DefaultHost
 	}
 	cfg.APIKey = strings.TrimSpace(cfg.APIKey)
+	cfg.AdminAPIKey = strings.TrimSpace(cfg.AdminAPIKey)
+	cfg.AdminKeyHash = strings.TrimSpace(cfg.AdminKeyHash)
 	cfg.OAuthClientID = strings.TrimSpace(cfg.OAuthClientID)
 	cfg.OAuthClientSecret = strings.TrimSpace(cfg.OAuthClientSecret)
 	if cfg.DailyEndpoint == "" {
@@ -210,6 +279,14 @@ func (cfg *Config) normalize() {
 	cfg.DailyEndpoint = strings.TrimRight(cfg.DailyEndpoint, "/")
 	cfg.ProdEndpoint = strings.TrimRight(cfg.ProdEndpoint, "/")
 	cfg.ClientVersion = strings.TrimSpace(cfg.ClientVersion)
+
+	for i := range cfg.Accounts {
+		cfg.Accounts[i].ID = strings.TrimSpace(cfg.Accounts[i].ID)
+		cfg.Accounts[i].Label = strings.TrimSpace(cfg.Accounts[i].Label)
+		cfg.Accounts[i].AccountID = strings.TrimSpace(cfg.Accounts[i].AccountID)
+		cfg.Accounts[i].AccountEmail = strings.TrimSpace(cfg.Accounts[i].AccountEmail)
+		cfg.Accounts[i].ProjectID = strings.TrimSpace(cfg.Accounts[i].ProjectID)
+	}
 }
 
 // Validate checks effective settings without reading the environment, applying
@@ -218,7 +295,13 @@ func (cfg Config) Validate() error {
 	if cfg.Port < 1 || cfg.Port > 65535 {
 		return fmt.Errorf("port must be an integer from 1 to 65535")
 	}
-	if err := validateListenAddress(cfg.Host, cfg.APIKey); err != nil {
+	if err := validateListenAddress(cfg.Host, cfg.effectiveListenKey()); err != nil {
+		return err
+	}
+	if isLoopback(cfg.Host) && len(cfg.Accounts) > 1 && cfg.allKeysCount() == 0 {
+		return fmt.Errorf("API keys are required when multiple accounts are configured")
+	}
+	if err := ValidateAccounts(cfg.Accounts); err != nil {
 		return err
 	}
 	if err := validateCloudEndpoint("ANTIGRAVITY_DAILY_ENDPOINT", cfg.DailyEndpoint); err != nil {
@@ -337,6 +420,23 @@ func validateCloudEndpoint(name, endpoint string) error {
 	return fmt.Errorf("%s must use HTTPS; plain HTTP is allowed only for localhost/loopback testing", name)
 }
 
+// ReadDiskAccounts reads accounts from path using owner-only permissions and strict JSON decoding.
+// If the configuration file contains legacy flat credentials, it returns the migrated accounts.
+func ReadDiskAccounts(path string) ([]Account, error) {
+	if path == "" {
+		return nil, nil
+	}
+	var cfg Config
+	_, err := readConfig(path, &cfg)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return cfg.Accounts, nil
+}
+
 // readConfig reads only disk settings, without defaults or environment overrides.
 // Missing files leave cfg unchanged. Duplicate top-level fields are rejected even
 // when their values agree, using the case-insensitive matching of encoding/json.
@@ -379,6 +479,12 @@ func readConfig(path string, cfg *Config) ([]byte, error) {
 	var trailing json.RawMessage
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		return nil, fmt.Errorf("config %s must contain exactly one JSON object", path)
+	}
+	if len(cfg.Accounts) > 0 && cfg.hasLegacyCredentials() {
+		return nil, fmt.Errorf("config %s cannot mix legacy credential fields with 'accounts' array", path)
+	}
+	if len(cfg.Accounts) == 0 && cfg.hasLegacyCredentials() {
+		cfg.Accounts = cfg.migratedLegacyAccounts()
 	}
 	return data, nil
 }
@@ -427,6 +533,30 @@ func UpdateCredentials(path string, creds Credentials) error {
 		if err := json.Unmarshal(data, &fields); err != nil {
 			return fmt.Errorf("read saved credentials: %w", err)
 		}
+	}
+	if _, hasAccounts := fields["accounts"]; hasAccounts {
+		return UpdateAccounts(path, func(accounts *[]Account) error {
+			for i := range *accounts {
+				matched := false
+				if creds.AccountID != "" && (*accounts)[i].AccountID == creds.AccountID {
+					matched = true
+				} else if creds.AccountID == "" && (*accounts)[i].ID == "default" {
+					matched = true
+				}
+				if matched {
+					(*accounts)[i].ApplyCredentials(creds)
+					return nil
+				}
+			}
+			newAcc := Account{
+				ID:      "default",
+				Label:   "Default",
+				Enabled: true,
+			}
+			newAcc.ApplyCredentials(creds)
+			*accounts = append(*accounts, newAcc)
+			return nil
+		})
 	}
 	for _, field := range []struct {
 		key   string
@@ -557,4 +687,224 @@ func saveConfigBytesWithFS(path string, data []byte, fs configFilesystem) error 
 		}
 	}
 	return nil
+}
+
+// UpdateAdminKey updates or sets the adminKeyHash in the configuration file at path.
+func UpdateAdminKey(path, adminKeyHash string) error {
+	var disk Config
+	data, err := readConfig(path, &disk)
+	if err != nil {
+		return err
+	}
+	fields := make(map[string]json.RawMessage)
+	if len(data) != 0 {
+		if err := json.Unmarshal(data, &fields); err != nil {
+			return fmt.Errorf("read saved config: %w", err)
+		}
+	}
+	hashJSON, err := json.Marshal(adminKeyHash)
+	if err != nil {
+		return err
+	}
+	fields["adminKeyHash"] = hashJSON
+	outData, err := json.MarshalIndent(fields, "", "  ")
+	if err != nil {
+		return err
+	}
+	return saveConfigBytes(path, outData)
+}
+
+func (cfg Config) hasLegacyCredentials() bool {
+	return cfg.AccessToken != "" || cfg.RefreshToken != "" || cfg.AccountID != "" ||
+		cfg.AccountEmail != "" || cfg.APIKey != "" || cfg.OAuthClientID != ""
+}
+
+// HasLegacyCredentials reports whether flat legacy credential fields are present.
+func (cfg Config) HasLegacyCredentials() bool {
+	return cfg.hasLegacyCredentials()
+}
+
+func (cfg Config) migratedLegacyAccounts() []Account {
+	var keys []AccountKey
+	if cfg.APIKey != "" {
+		keys = append(keys, AccountKey{
+			ID:        "key_legacy",
+			Label:     "legacy",
+			Hash:      apikey.Hash(cfg.APIKey),
+			Last4:     apikey.Last4(cfg.APIKey),
+			CreatedAt: time.Now().UTC(),
+		})
+	}
+	return []Account{
+		{
+			ID:                "default",
+			Label:             "Default",
+			Enabled:           true,
+			RefreshToken:      cfg.RefreshToken,
+			AccessToken:       cfg.AccessToken,
+			OAuthClientID:     cfg.OAuthClientID,
+			OAuthClientSecret: cfg.OAuthClientSecret,
+			AccountID:         cfg.AccountID,
+			AccountEmail:      cfg.AccountEmail,
+			AccountName:       cfg.AccountName,
+			ProjectID:         cfg.ProjectID,
+			Keys:              keys,
+		},
+	}
+}
+
+// MigratedLegacyAccounts converts flat legacy credentials to the default account.
+func (cfg Config) MigratedLegacyAccounts() []Account {
+	return cfg.migratedLegacyAccounts()
+}
+
+func (cfg Config) effectiveListenKey() string {
+	if cfg.APIKey != "" {
+		return cfg.APIKey
+	}
+	if cfg.AdminAPIKey != "" {
+		return cfg.AdminAPIKey
+	}
+	if cfg.AdminKeyHash != "" {
+		return cfg.AdminKeyHash
+	}
+	if cfg.allKeysCount() > 0 {
+		return "configured"
+	}
+	return ""
+}
+
+func (cfg Config) allKeysCount() int {
+	count := 0
+	for _, acc := range cfg.Accounts {
+		count += len(acc.Keys)
+	}
+	return count
+}
+
+func isLoopback(host string) bool {
+	ip := net.ParseIP(host)
+	return strings.EqualFold(host, "localhost") || (ip != nil && ip.IsLoopback())
+}
+
+// EnsureDefaultAccountKey adds key_env with key's hash to the default account.
+// If no default account exists, a default account is appended.
+func (cfg *Config) EnsureDefaultAccountKey(key string) {
+	keyHash := apikey.Hash(key)
+	for i := range cfg.Accounts {
+		if cfg.Accounts[i].ID == "default" {
+			for _, k := range cfg.Accounts[i].Keys {
+				if k.Hash == keyHash {
+					return
+				}
+			}
+			cfg.Accounts[i].Keys = append(cfg.Accounts[i].Keys, AccountKey{
+				ID:        "key_env",
+				Label:     "env",
+				Hash:      keyHash,
+				Last4:     apikey.Last4(key),
+				CreatedAt: time.Now().UTC(),
+			})
+			return
+		}
+	}
+	cfg.Accounts = append(cfg.Accounts, Account{
+		ID:      "default",
+		Label:   "Default",
+		Enabled: true,
+		Keys: []AccountKey{
+			{
+				ID:        "key_env",
+				Label:     "env",
+				Hash:      keyHash,
+				Last4:     apikey.Last4(key),
+				CreatedAt: time.Now().UTC(),
+			},
+		},
+	})
+}
+
+// ApplyDefaultAccountTokenOverride replaces tokens on the default account and clears identity.
+func (cfg *Config) ApplyDefaultAccountTokenOverride(accessToken, refreshToken string) {
+	for i := range cfg.Accounts {
+		if cfg.Accounts[i].ID == "default" {
+			cfg.Accounts[i].AccessToken = accessToken
+			cfg.Accounts[i].RefreshToken = refreshToken
+			cfg.Accounts[i].AccountID = ""
+			cfg.Accounts[i].AccountEmail = ""
+			cfg.Accounts[i].AccountName = ""
+			return
+		}
+	}
+	cfg.Accounts = append(cfg.Accounts, Account{
+		ID:           "default",
+		Label:        "Default",
+		Enabled:      true,
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+	})
+}
+
+// ApplyDefaultAccountOAuth sets OAuth client credentials on the default account.
+func (cfg *Config) ApplyDefaultAccountOAuth(id, secret string) {
+	for i := range cfg.Accounts {
+		if cfg.Accounts[i].ID == "default" {
+			cfg.Accounts[i].OAuthClientID = id
+			cfg.Accounts[i].OAuthClientSecret = secret
+			return
+		}
+	}
+}
+
+// ApplyDefaultAccountProjectID sets the project ID on the default account if empty.
+func (cfg *Config) ApplyDefaultAccountProjectID(projectID string) {
+	for i := range cfg.Accounts {
+		if cfg.Accounts[i].ID == "default" && cfg.Accounts[i].ProjectID == "" {
+			cfg.Accounts[i].ProjectID = projectID
+			return
+		}
+	}
+}
+
+// ApplyEnvironmentLayer applies environment overrides (API_KEY, token overrides, OAuth client, and project ID)
+// onto an accounts collection, ensuring identical behavior across initial startup and subsequent reloads.
+func (cfg *Config) ApplyEnvironmentLayer(accounts []Account) []Account {
+	result := make([]Account, len(accounts))
+	for i, a := range accounts {
+		result[i] = a
+		if len(a.Keys) > 0 {
+			result[i].Keys = make([]AccountKey, len(a.Keys))
+			copy(result[i].Keys, a.Keys)
+		}
+	}
+
+	tempCfg := Config{Accounts: result}
+	if cfg.Env.HasAPIKey && cfg.Env.APIKey != "" {
+		tempCfg.EnsureDefaultAccountKey(cfg.Env.APIKey)
+	}
+
+	if cfg.Env.HasTokens {
+		tempCfg.ApplyDefaultAccountTokenOverride(cfg.Env.AccessToken, cfg.Env.RefreshToken)
+	} else if TokenEnvironmentOverrides() {
+		tempCfg.ApplyDefaultAccountTokenOverride(cfg.AccessToken, cfg.RefreshToken)
+	}
+
+	if cfg.Env.HasOAuth {
+		tempCfg.ApplyDefaultAccountOAuth(cfg.Env.OAuthClientID, cfg.Env.OAuthClientSecret)
+	}
+
+	if cfg.Env.HasProjectID {
+		tempCfg.ApplyDefaultAccountProjectID(cfg.Env.ProjectID)
+	}
+
+	if len(tempCfg.Accounts) == 0 {
+		tempCfg.Accounts = []Account{
+			{
+				ID:      "default",
+				Label:   "Default",
+				Enabled: true,
+			},
+		}
+	}
+	return tempCfg.Accounts
 }

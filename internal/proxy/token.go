@@ -47,7 +47,7 @@ func (s *tokenSource) token(ctx context.Context, poll bool) (string, error) {
 		return s.cfg.AccessToken, nil
 	}
 	if s.cfg.RefreshToken == "" {
-		return "", errors.New("no Google credential configured; use /config/login or configure credentials")
+		return "", errors.New("no Google credential configured; use /admin/login-sessions or configure credentials")
 	}
 	if poll {
 		if !s.mu.TryLock() {

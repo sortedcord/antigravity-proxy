@@ -126,6 +126,11 @@ func (s *Service) quotaCollector() *Collector {
 	return s.collector
 }
 
+// QuotaCollector returns the active quota collector if running.
+func (s *Service) QuotaCollector() *Collector {
+	return s.quotaCollector()
+}
+
 // TriggerPoll requests an immediate poll if quota collection is active.
 func (s *Service) TriggerPoll() {
 	if c := s.quotaCollector(); c != nil {
@@ -192,6 +197,11 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}{Result: result, Polling: polling})
 }
 
+// SnapshotStale determines whether an observation is stale based on the poll interval and errors.
+func SnapshotStale(observedAt time.Time, interval time.Duration, lastError string, now time.Time) bool {
+	return snapshotStale(observedAt, interval, lastError, now)
+}
+
 // snapshotStale allows two full polling intervals for an observation to land.
 // Adding the intervals separately avoids overflowing a doubled Duration.
 func snapshotStale(observedAt time.Time, interval time.Duration, lastError string, now time.Time) bool {
@@ -224,7 +234,7 @@ func parseUsageQuery(raw string) (Query, error) {
 			} else {
 				query.To = &parsed
 			}
-		case "pool":
+		case "pool", "group":
 			query.Pool = value
 		case "window":
 			query.Window = value

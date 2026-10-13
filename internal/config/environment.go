@@ -10,7 +10,7 @@ import (
 // test environments. Runtime values are never included in this metadata.
 func EnvironmentVariables() []string {
 	return []string{
-		"HOST", "PORT", "API_KEY",
+		"HOST", "PORT", "API_KEY", "ADMIN_API_KEY",
 		"ANTIGRAVITY_ACCESS_TOKEN", "ANTIGRAVITY_REFRESH_TOKEN",
 		"ANTIGRAVITY_OAUTH_CLIENT_ID", "ANTIGRAVITY_OAUTH_CLIENT_SECRET",
 		"ANTIGRAVITY_PROJECT_ID", "ANTIGRAVITY_DAILY_ENDPOINT", "ANTIGRAVITY_PROD_ENDPOINT",
