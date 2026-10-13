@@ -17,14 +17,27 @@ import (
 func observation(at time.Time, remaining float64) quota.Snapshot {
 	reset := at.Add(5 * time.Hour)
 	amount := "12345"
-	window := func(id, name string, fraction float64) quota.Window {
-		percent, used := fraction*100, (1-fraction)*100
-		return quota.Window{BucketID: id, Window: name, Status: "available", RemainingFraction: &fraction, RemainingPercent: &percent, UsedPercent: &used, RemainingAmount: &amount, ResetAt: &reset}
+	bucket := func(id, poolName, window string, fraction float64) quota.Bucket {
+		return quota.Bucket{
+			ID:                id,
+			PoolDisplayName:   poolName,
+			Window:            window,
+			Status:            "available",
+			RemainingFraction: &fraction,
+			RemainingAmount:   &amount,
+			ResetAt:           &reset,
+		}
 	}
-	return quota.Snapshot{ObservedAt: at, Source: "retrieveUserQuotaSummary", Pools: quota.Pools{
-		Gemini:     quota.Pool{ID: quota.GeminiPool, DisplayName: "Gemini Models", FiveHour: window("gemini-5h", "5h", remaining), Weekly: window("gemini-weekly", "weekly", 0.75)},
-		ThirdParty: quota.Pool{ID: quota.ThirdPartyPool, DisplayName: "Claude and GPT models", FiveHour: window("3p-5h", "5h", 0.5), Weekly: window("3p-weekly", "weekly", 0.25)},
-	}}
+	return quota.Snapshot{
+		ObservedAt: at,
+		Source:     "retrieveUserQuotaSummary",
+		Buckets: []quota.Bucket{
+			bucket("gemini-5h", "Gemini Models", "5h", remaining),
+			bucket("gemini-weekly", "Gemini Models", "weekly", 0.75),
+			bucket("3p-5h", "Claude and GPT models", "5h", 0.5),
+			bucket("3p-weekly", "Claude and GPT models", "weekly", 0.25),
+		},
+	}
 }
 
 func observationTime() time.Time { return time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC) }
@@ -56,12 +69,11 @@ func requireSnapshot(t *testing.T, c *Collector, want quota.Snapshot) PollInfo {
 }
 
 func allEntries(sample quota.Snapshot) []Entry {
-	return []Entry{
-		{ObservedAt: sample.ObservedAt, Pool: "gemini", PoolDisplayName: "Gemini Models", Window: sample.Pools.Gemini.FiveHour},
-		{ObservedAt: sample.ObservedAt, Pool: "gemini", PoolDisplayName: "Gemini Models", Window: sample.Pools.Gemini.Weekly},
-		{ObservedAt: sample.ObservedAt, Pool: "third_party", PoolDisplayName: "Claude and GPT models", Window: sample.Pools.ThirdParty.FiveHour},
-		{ObservedAt: sample.ObservedAt, Pool: "third_party", PoolDisplayName: "Claude and GPT models", Window: sample.Pools.ThirdParty.Weekly},
+	entries := make([]Entry, len(sample.Buckets))
+	for i, b := range sample.Buckets {
+		entries[i] = Entry{ObservedAt: sample.ObservedAt, Bucket: b.Clone()}
 	}
+	return entries
 }
 
 func TestRestartReloadsDurableSnapshotAndPollingTime(t *testing.T) {
@@ -141,8 +153,8 @@ func TestRestartReloadsDurableSnapshotAndPollingTime(t *testing.T) {
 func TestHistoryInclusiveFiltersPaginationAndStableOrdering(t *testing.T) {
 	t0 := observationTime()
 	a, b, d := observation(t0, 0), observation(t0.Add(time.Minute), 0.4), observation(t0.Add(2*time.Minute), 0.9)
-	b.Pools.Gemini.Weekly = quota.Window{BucketID: "gemini-weekly", Window: "weekly", Status: "unavailable", UnavailableReason: "not_reported"}
-	b.Pools.ThirdParty.Weekly = quota.Window{BucketID: "3p-weekly", Window: "weekly", Status: "disabled", Disabled: true, UnavailableReason: "upstream_disabled"}
+	b.Buckets[1] = quota.Bucket{ID: "gemini-weekly", PoolDisplayName: "Gemini Models", Window: "weekly", Status: "unavailable", UnavailableReason: "not_reported"}
+	b.Buckets[3] = quota.Bucket{ID: "3p-weekly", PoolDisplayName: "Claude and GPT models", Window: "weekly", Status: "disabled", UnavailableReason: "upstream_disabled"}
 	// Persist out of timestamp order. Latest is the most recently persisted
 	// success, while history is ordered by observation time.
 	samples := []quota.Snapshot{d, a, b}
@@ -230,7 +242,7 @@ func TestHistoryEqualTimestampTieOrder(t *testing.T) {
 func TestHistoryInvalidQueriesAndBoundedOutput(t *testing.T) {
 	c := openTestCollector(t, filepath.Join(t.TempDir(), "history"), time.Second, func(context.Context) (quota.Snapshot, error) { return observation(observationTime(), 1), nil })
 	from, to := observationTime().Add(time.Second), observationTime()
-	for _, query := range []Query{{Pool: "model"}, {Window: "daily"}, {Limit: -1}, {Limit: 1001}, {Offset: -1}, {Order: "newest"}, {From: &from, To: &to}} {
+	for _, query := range []Query{{Limit: -1}, {Limit: 1001}, {Offset: -1}, {Order: "newest"}, {From: &from, To: &to}} {
 		if _, err := c.History(query); err == nil {
 			t.Errorf("accepted invalid query %+v", query)
 		}
@@ -257,11 +269,15 @@ func TestSnapshotsAndQueryResultsAreIndependent(t *testing.T) {
 	want := original.Clone()
 	c := openTestCollector(t, filepath.Join(t.TempDir(), "history"), time.Second, func(context.Context) (quota.Snapshot, error) { return original, nil })
 	c.poll(context.Background())
-	*original.Pools.Gemini.FiveHour.RemainingFraction = 0.9
-	*original.Pools.Gemini.FiveHour.ResetAt = observationTime().Add(time.Hour)
-	*original.Pools.Gemini.FiveHour.RemainingAmount = "999"
+	newFrac := 0.9
+	original.Buckets[0].RemainingFraction = &newFrac
+	newReset := observationTime().Add(time.Hour)
+	original.Buckets[0].ResetAt = &newReset
+	newAmt := "999"
+	original.Buckets[0].RemainingAmount = &newAmt
 	got, _, info := c.Latest()
-	*got.Pools.Gemini.FiveHour.RemainingPercent = 99
+	newGotFrac := 0.99
+	got.Buckets[0].RemainingFraction = &newGotFrac
 	*info.LastSuccessAt = observationTime().Add(time.Hour)
 	*info.LastAttemptAt = observationTime().Add(time.Hour)
 	from := observationTime()
@@ -269,7 +285,8 @@ func TestSnapshotsAndQueryResultsAreIndependent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	*page.Entries[0].UsedPercent = 99
+	newEntryFrac := 0.99
+	page.Entries[0].RemainingFraction = &newEntryFrac
 	*page.Entries[0].ResetAt = observationTime().Add(time.Hour)
 	*page.Entries[0].RemainingAmount = "888"
 	*page.From = observationTime().Add(time.Hour)
@@ -332,15 +349,16 @@ func TestInvalidObservationsDoNotAppend(t *testing.T) {
 	}{
 		{"zero time", func(s *quota.Snapshot) { s.ObservedAt = time.Time{} }},
 		{"missing source", func(s *quota.Snapshot) { s.Source = "" }},
-		{"wrong pool", func(s *quota.Snapshot) { s.Pools.Gemini.ID = "model" }},
-		{"wrong window", func(s *quota.Snapshot) { s.Pools.Gemini.Weekly.Window = "daily" }},
-		{"wrong bucket", func(s *quota.Snapshot) { s.Pools.Gemini.Weekly.BucketID = "unknown" }},
-		{"unknown status", func(s *quota.Snapshot) { s.Pools.Gemini.Weekly.Status = "full" }},
-		{"nan", func(s *quota.Snapshot) { *s.Pools.Gemini.FiveHour.RemainingFraction = math.NaN() }},
-		{"infinity", func(s *quota.Snapshot) { *s.Pools.Gemini.FiveHour.UsedPercent = math.Inf(1) }},
-		{"range", func(s *quota.Snapshot) { *s.Pools.Gemini.FiveHour.RemainingPercent = 101 }},
-		{"disabled contradiction", func(s *quota.Snapshot) { s.Pools.Gemini.Weekly.Disabled = true }},
-		{"unavailable percentages", func(s *quota.Snapshot) { s.Pools.Gemini.Weekly.Status = "unavailable" }},
+		{"empty id", func(s *quota.Snapshot) { s.Buckets[0].ID = "" }},
+		{"unknown status", func(s *quota.Snapshot) { s.Buckets[0].Status = "full" }},
+		{"nan", func(s *quota.Snapshot) { f := math.NaN(); s.Buckets[0].RemainingFraction = &f }},
+		{"infinity", func(s *quota.Snapshot) { f := math.Inf(1); s.Buckets[0].RemainingFraction = &f }},
+		{"range", func(s *quota.Snapshot) { f := 1.01; s.Buckets[0].RemainingFraction = &f }},
+		{"unavailable fraction", func(s *quota.Snapshot) {
+			f := 0.5
+			s.Buckets[0].Status = "unavailable"
+			s.Buckets[0].RemainingFraction = &f
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

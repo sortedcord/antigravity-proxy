@@ -56,7 +56,8 @@ func waitForLimit(t *testing.T, client *http.Client, address, key string, fracti
 	var response limitResponse
 	testutil.Eventually(t, func() bool {
 		code := requestStatus(t, client, address+"/status/limit", key, &response)
-		return code == http.StatusOK && response.Pools.Gemini.FiveHour.RemainingFraction != nil && *response.Pools.Gemini.FiveHour.RemainingFraction == fraction
+		b, found := response.Bucket("gemini-5h")
+		return code == http.StatusOK && found && b.RemainingFraction != nil && *b.RemainingFraction == fraction
 	}, "quota observation was not published")
 	return response
 }
@@ -106,11 +107,14 @@ func TestQuotaStatusPollingHistoryAndRestartHTTP(t *testing.T) {
 	client := server.Client()
 	client.Timeout = time.Second
 	first := waitForLimit(t, client, server.URL, cfg.APIKey, 0.75)
-	if first.Pools.ThirdParty.FiveHour.RemainingFraction == nil || *first.Pools.ThirdParty.FiveHour.RemainingFraction != 0 || first.Pools.ThirdParty.FiveHour.Status != "available" {
-		t.Fatalf("exhausted third-party quota was not preserved: %+v", first.Pools.ThirdParty.FiveHour)
+	firstTP5h, _ := first.Bucket("3p-5h")
+	if firstTP5h.RemainingFraction == nil || *firstTP5h.RemainingFraction != 0 || firstTP5h.Status != "available" {
+		t.Fatalf("exhausted third-party quota was not preserved: %+v", firstTP5h)
 	}
-	if first.Pools.Gemini.Weekly.RemainingPercent == nil || *first.Pools.Gemini.Weekly.RemainingPercent != 60 || first.Pools.ThirdParty.Weekly.RemainingFraction == nil || *first.Pools.ThirdParty.Weekly.RemainingFraction != 0.9 {
-		t.Fatalf("pool/window values were mixed: %+v", first.Pools)
+	firstGW, _ := first.Bucket("gemini-weekly")
+	firstTPW, _ := first.Bucket("3p-weekly")
+	if firstGW.RemainingFraction == nil || *firstGW.RemainingFraction != 0.6 || firstTPW.RemainingFraction == nil || *firstTPW.RemainingFraction != 0.9 {
+		t.Fatalf("pool/window values were mixed: %+v", first.Buckets)
 	}
 	second := waitForLimit(t, client, server.URL, cfg.APIKey, 0.50)
 	if !second.ObservedAt.After(first.ObservedAt) || second.Polling.IntervalSeconds != 1 {
@@ -121,7 +125,8 @@ func TestQuotaStatusPollingHistoryAndRestartHTTP(t *testing.T) {
 		var retained limitResponse
 		code := requestStatus(t, client, server.URL+"/status/limit", cfg.APIKey, &retained)
 		if retained.Polling.LastError != "" {
-			if code != http.StatusOK || !retained.Stale || !retained.ObservedAt.Equal(second.ObservedAt) || retained.Pools.Gemini.FiveHour.RemainingFraction == nil || *retained.Pools.Gemini.FiveHour.RemainingFraction != 0.50 {
+			retainedG5h, _ := retained.Bucket("gemini-5h")
+			if code != http.StatusOK || !retained.Stale || !retained.ObservedAt.Equal(second.ObservedAt) || retainedG5h.RemainingFraction == nil || *retainedG5h.RemainingFraction != 0.50 {
 				t.Fatalf("failed poll did not preserve and mark the last observation: %+v", retained)
 			}
 			break
@@ -165,7 +170,7 @@ func TestQuotaStatusPollingHistoryAndRestartHTTP(t *testing.T) {
 		t.Fatalf("wrong historical pagination: %+v", history)
 	}
 	entry := history.Entries[0]
-	if entry.Pool != "gemini" || entry.Window.Window != "weekly" || entry.BucketID != "gemini-weekly" || !entry.ObservedAt.Equal(first.ObservedAt) || entry.RemainingFraction == nil || *entry.RemainingFraction != 0.60 {
+	if entry.PoolDisplayName != "Gemini Models" || entry.Window != "weekly" || entry.ID != "gemini-weekly" || !entry.ObservedAt.Equal(first.ObservedAt) || entry.RemainingFraction == nil || *entry.RemainingFraction != 0.60 {
 		t.Fatalf("wrong selected historical measurement: %+v", entry)
 	}
 	parameters.Set("offset", "1")

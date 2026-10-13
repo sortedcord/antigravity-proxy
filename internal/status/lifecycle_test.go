@@ -94,9 +94,9 @@ func TestAmountOnlyAndUnusableWindowsPersistWithoutFabricatedPercentages(t *test
 	path := filepath.Join(t.TempDir(), "history")
 	sample := observation(observationTime(), 0)
 	amount := "-9223372036854775808"
-	sample.Pools.Gemini.Weekly = quota.Window{BucketID: "gemini-weekly", Window: "weekly", Status: "available", RemainingAmount: &amount}
-	sample.Pools.ThirdParty.FiveHour = quota.Window{BucketID: "3p-5h", Window: "5h", Status: "unavailable", ResetAt: sample.Pools.ThirdParty.FiveHour.ResetAt, UnavailableReason: "invalid_remaining_fraction"}
-	sample.Pools.ThirdParty.Weekly = quota.Window{BucketID: "3p-weekly", Window: "weekly", Status: "disabled", Disabled: true, ResetAt: sample.Pools.ThirdParty.Weekly.ResetAt, UnavailableReason: "upstream_disabled"}
+	sample.Buckets[1] = quota.Bucket{ID: "gemini-weekly", PoolDisplayName: "Gemini Models", Window: "weekly", Status: "available", RemainingAmount: &amount}
+	sample.Buckets[2] = quota.Bucket{ID: "3p-5h", PoolDisplayName: "Claude and GPT models", Window: "5h", Status: "unavailable", ResetAt: sample.Buckets[2].ResetAt, UnavailableReason: "invalid_remaining_fraction"}
+	sample.Buckets[3] = quota.Bucket{ID: "3p-weekly", PoolDisplayName: "Claude and GPT models", Window: "weekly", Status: "disabled", ResetAt: sample.Buckets[3].ResetAt, UnavailableReason: "upstream_disabled"}
 	c, err := Open(path, time.Second, 0, func(context.Context) (quota.Snapshot, error) { return sample, nil })
 	if err != nil {
 		t.Fatal(err)
@@ -112,12 +112,12 @@ func TestAmountOnlyAndUnusableWindowsPersistWithoutFabricatedPercentages(t *test
 	if err != nil || page.Total != 4 || !reflect.DeepEqual(page.Entries, allEntries(sample)) {
 		t.Fatalf("mixed window history = %+v, %v", page, err)
 	}
-	if page.Entries[0].RemainingPercent == nil || *page.Entries[0].RemainingPercent != 0 || page.Entries[0].Status != "available" {
+	if page.Entries[0].RemainingFraction == nil || *page.Entries[0].RemainingFraction != 0 || page.Entries[0].Status != "available" {
 		t.Fatal("authoritative zero was lost")
 	}
 	for _, entry := range page.Entries[1:] {
-		if entry.RemainingFraction != nil || entry.RemainingPercent != nil || entry.UsedPercent != nil {
-			t.Fatalf("fabricated percentage for %s: %+v", entry.BucketID, entry)
+		if entry.RemainingFraction != nil {
+			t.Fatalf("fabricated fraction for %s: %+v", entry.ID, entry)
 		}
 	}
 }

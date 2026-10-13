@@ -229,8 +229,8 @@ func waitQuota(t *testing.T, r *Runtime, fraction float64) {
 		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &snapshot) != nil {
 			return false
 		}
-		value := snapshot.Pools.Gemini.FiveHour.RemainingFraction
-		return value != nil && *value == fraction
+		b, found := snapshot.Bucket("gemini-5h")
+		return response.Code == http.StatusOK && found && b.RemainingFraction != nil && *b.RemainingFraction == fraction
 	}, "expected account quota was not observed")
 }
 
@@ -383,8 +383,8 @@ func TestRuntimeHistoryRestartsInPersistedAccountNamespace(t *testing.T) {
 			if account == "b" {
 				expected = .75
 			}
-			value := snapshot.Pools.Gemini.FiveHour.RemainingFraction
-			if value == nil || *value != expected {
+			b, found := snapshot.Bucket("gemini-5h")
+			if !found || b.RemainingFraction == nil || *b.RemainingFraction != expected {
 				t.Fatalf("mixed history for %s: %+v", account, snapshot)
 			}
 		}

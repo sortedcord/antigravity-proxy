@@ -179,56 +179,44 @@ curl http://127.0.0.1:8080/status/limit \
 {
   "observed_at": "2026-10-07T09:59:38Z",
   "source": "retrieveUserQuotaSummary",
-  "pools": {
-    "gemini": {
-      "id": "gemini",
-      "display_name": "Gemini Models",
-      "five_hour": {
-        "bucket_id": "gemini-5h",
-        "window": "5h",
-        "status": "available",
-        "disabled": false,
-        "remaining_fraction": 0.998,
-        "remaining_percent": 99.8,
-        "used_percent": 0.2,
-        "reset_at": "2026-10-07T12:20:15Z"
-      },
-      "weekly": {
-        "bucket_id": "gemini-weekly",
-        "window": "weekly",
-        "status": "available",
-        "disabled": false,
-        "remaining_fraction": 0.998,
-        "remaining_percent": 99.8,
-        "used_percent": 0.2,
-        "reset_at": "2026-10-11T16:02:27Z"
-      }
+  "buckets": [
+    {
+      "id": "gemini-5h",
+      "pool_display_name": "Gemini Models",
+      "window": "5h",
+      "display_name": "Five Hour Limit Remaining",
+      "status": "available",
+      "remaining_fraction": 0.998,
+      "reset_at": "2026-10-07T12:20:15Z"
     },
-    "third_party": {
-      "id": "third_party",
-      "display_name": "Claude and GPT models",
-      "five_hour": {
-        "bucket_id": "3p-5h",
-        "window": "5h",
-        "status": "available",
-        "disabled": false,
-        "remaining_fraction": 0.931,
-        "remaining_percent": 93.1,
-        "used_percent": 6.9,
-        "reset_at": "2026-10-07T14:18:50Z"
-      },
-      "weekly": {
-        "bucket_id": "3p-weekly",
-        "window": "weekly",
-        "status": "available",
-        "disabled": false,
-        "remaining_fraction": 0.953,
-        "remaining_percent": 95.3,
-        "used_percent": 4.7,
-        "reset_at": "2026-10-13T04:42:09Z"
-      }
+    {
+      "id": "gemini-weekly",
+      "pool_display_name": "Gemini Models",
+      "window": "weekly",
+      "display_name": "Weekly Limit Remaining",
+      "status": "available",
+      "remaining_fraction": 0.998,
+      "reset_at": "2026-10-11T16:02:27Z"
+    },
+    {
+      "id": "3p-5h",
+      "pool_display_name": "Claude and GPT models",
+      "window": "5h",
+      "display_name": "Five Hour Limit Remaining",
+      "status": "available",
+      "remaining_fraction": 0.931,
+      "reset_at": "2026-10-07T14:18:50Z"
+    },
+    {
+      "id": "3p-weekly",
+      "pool_display_name": "Claude and GPT models",
+      "window": "weekly",
+      "display_name": "Weekly Limit Remaining",
+      "status": "available",
+      "remaining_fraction": 0.953,
+      "reset_at": "2026-10-13T04:42:09Z"
     }
-  },
+  ],
   "polling": {
     "interval_seconds": 300,
     "last_attempt_at": "2026-10-07T09:59:37Z",

@@ -72,7 +72,7 @@ func TestPollingImmediatePeriodicTransitionsAndCancellation(t *testing.T) {
 		return exists && reflect.DeepEqual(s, second) && info.LastError == ""
 	})
 	third := observation(observationTime().Add(2*time.Minute), 1)
-	third.Pools.ThirdParty.Weekly = quota.Window{BucketID: "3p-weekly", Window: "weekly", Status: "unavailable", UnavailableReason: "not_reported"}
+	third.Buckets[3] = quota.Bucket{ID: "3p-weekly", PoolDisplayName: "Claude and GPT models", Window: "weekly", Status: "unavailable", UnavailableReason: "not_reported"}
 	receiveCall(t, calls) <- third
 	awaitState(t, c, func(s quota.Snapshot, exists bool, _ PollInfo) bool { return exists && reflect.DeepEqual(s, third) })
 	page, err := c.History(Query{Order: "asc"})
@@ -305,13 +305,15 @@ func TestConcurrentReadsDuringPollingAndClose(t *testing.T) {
 					failures <- "latest snapshot and LastSuccessAt are inconsistent"
 					return
 				}
-				*sample.Pools.Gemini.FiveHour.RemainingPercent = 100
+				newFrac := 1.0
+				sample.Buckets[0].RemainingFraction = &newFrac
 				page, err := c.History(Query{Limit: 1, Order: "asc"})
 				if err != nil || len(page.Entries) != 1 || !reflect.DeepEqual(page.Entries[0], allEntries(first)[0]) {
 					failures <- "ascending boundary changed under concurrent polling"
 					return
 				}
-				*page.Entries[0].RemainingFraction = 0.99
+				newEntryFrac := 0.99
+				page.Entries[0].RemainingFraction = &newEntryFrac
 			}
 		}()
 	}

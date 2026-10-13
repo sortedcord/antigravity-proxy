@@ -7,56 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 )
-
-const (
-	// GeminiPool identifies the shared Gemini model pool.
-	GeminiPool = "gemini"
-	// ThirdPartyPool identifies the shared Claude and GPT model pool.
-	ThirdPartyPool = "third_party"
-	// FiveHourWindow identifies the nominal five-hour quota window.
-	FiveHourWindow = "5h"
-	// WeeklyWindow identifies the nominal weekly quota window.
-	WeeklyWindow = "weekly"
-)
-
-// Snapshot is one authoritative observation. Consumers must not mutate its pointers.
-type Snapshot struct {
-	ObservedAt time.Time `json:"observed_at"`
-	Source     string    `json:"source"`
-	Pools      Pools     `json:"pools"`
-}
-
-// Pools contains both known shared model pools, including unavailable windows.
-type Pools struct {
-	Gemini     Pool `json:"gemini"`
-	ThirdParty Pool `json:"third_party"`
-}
-
-// Pool contains the two independently reported quota windows for one model pool.
-type Pool struct {
-	ID          string `json:"id"`
-	DisplayName string `json:"display_name"`
-	FiveHour    Window `json:"five_hour"`
-	Weekly      Window `json:"weekly"`
-}
-
-// Window describes a known bucket. Nil values mean unreported or unusable data,
-// never zero. RemainingAmount retains the upstream int64 string without units.
-type Window struct {
-	BucketID          string       `json:"bucket_id"`
-	Window            string       `json:"window"`
-	Status            WindowStatus `json:"status"`
-	Disabled          bool         `json:"disabled"`
-	RemainingFraction *float64     `json:"remaining_fraction"`
-	RemainingPercent  *float64     `json:"remaining_percent"`
-	UsedPercent       *float64     `json:"used_percent"`
-	RemainingAmount   *string      `json:"remaining_amount"`
-	ResetAt           *time.Time   `json:"reset_at"`
-	UnavailableReason string       `json:"unavailable_reason,omitempty"`
-}
 
 type rawBucket struct {
 	BucketID          json.RawMessage `json:"bucketId"`
@@ -74,67 +29,183 @@ type reportedBucket struct {
 }
 
 // Parse reads retrieveUserQuotaSummary groups or canonical buckets, optionally
-// nested in response/summary wrappers. Only known bucket IDs determine pool and
-// window; model names and reset distances never do. Invalid fields make that
-// window unavailable; malformed envelopes and conflicting duplicates are errors.
+// nested in response/summary wrappers. Only reported bucket IDs produce entries.
+// Malformed envelopes and conflicting duplicates are errors.
 // Every call owns its resulting pointer values independently of all other calls.
 func Parse(body []byte, observedAt time.Time) (Snapshot, error) {
-	snapshot := Snapshot{ObservedAt: observedAt, Source: "retrieveUserQuotaSummary"}
-	targets := make(map[string]Bucket, 4)
-	for _, bucket := range snapshot.Buckets() {
-		bucket.Pool.ID = bucket.PoolID
-		*bucket.Window = missing(bucket.ID, bucket.WindowID)
-		targets[bucket.ID] = bucket
+	snapshot := Snapshot{
+		ObservedAt: observedAt,
+		Source:     "retrieveUserQuotaSummary",
+		Buckets:    make([]Bucket, 0),
 	}
-	var buckets []reportedBucket
-	if err := collectBuckets(body, 0, &buckets); err != nil {
+
+	var rawBuckets []reportedBucket
+	if err := collectBuckets(body, 0, &rawBuckets); err != nil {
 		return Snapshot{}, err
 	}
-	seen := make(map[string]rawBucket, 4)
-	for _, reported := range buckets {
-		var id string
-		if json.Unmarshal(reported.bucket.BucketID, &id) != nil {
-			continue
+
+	seenSignatures := make(map[string]string)
+	parsedBuckets := make(map[string]Bucket)
+	groupDisplayNames := make(map[string]string)
+
+	for _, reported := range rawBuckets {
+		b, err := parseBucket(reported.bucket, reported.groupName)
+		if err != nil {
+			return Snapshot{}, err
 		}
-		bucket, known := targets[id]
-		if !known {
-			continue
+
+		groupKey := ""
+		if strings.HasPrefix(b.ID, "gemini-") {
+			groupKey = "gemini"
+		} else if strings.HasPrefix(b.ID, "3p-") {
+			groupKey = "3p"
 		}
-		pool, target := bucket.Pool, bucket.Window
-		if reported.groupName != "" {
-			if pool.DisplayName != "" && pool.DisplayName != reported.groupName {
-				return Snapshot{}, fmt.Errorf("conflicting quota pool display name for %s", pool.ID)
+		if groupKey != "" && reported.groupName != "" {
+			if existing, ok := groupDisplayNames[groupKey]; ok && existing != reported.groupName {
+				return Snapshot{}, fmt.Errorf("conflicting quota pool display name for %s", groupKey)
 			}
-			pool.DisplayName = reported.groupName
+			groupDisplayNames[groupKey] = reported.groupName
 		}
-		if previous, exists := seen[id]; exists {
-			if bucketSignature(reported.bucket, target.Window) != bucketSignature(previous, target.Window) {
-				return Snapshot{}, fmt.Errorf("conflicting duplicate quota bucket %s", id)
+
+		sig := bucketSignature(reported.bucket)
+		if prevSig, exists := seenSignatures[b.ID]; exists {
+			previous := parsedBuckets[b.ID]
+			if prevSig != sig || (previous.PoolDisplayName != "" && b.PoolDisplayName != "" && previous.PoolDisplayName != b.PoolDisplayName) {
+				return Snapshot{}, fmt.Errorf("conflicting duplicate quota bucket %s", b.ID)
+			}
+			// A repeated bucket may add group metadata through a groups wrapper.
+			if previous.PoolDisplayName == "" {
+				previous.PoolDisplayName = b.PoolDisplayName
+				parsedBuckets[b.ID] = previous
 			}
 			continue
 		}
-		seen[id] = reported.bucket
-		*target = parseWindow(reported.bucket, *target)
+		seenSignatures[b.ID] = sig
+		parsedBuckets[b.ID] = b
 	}
-	// For tiers that only report weekly limits (e.g. Google AI Plus), synthesize the
-	// 5-hour window from the weekly window so clients, UIs, and gateways see available quota.
-	for _, pool := range []*Pool{&snapshot.Pools.Gemini, &snapshot.Pools.ThirdParty} {
-		if pool.FiveHour.Status == StatusUnavailable && pool.FiveHour.UnavailableReason == "not_reported" && pool.Weekly.Status == StatusAvailable {
-			pool.FiveHour.Status = StatusAvailable
-			pool.FiveHour.Disabled = pool.Weekly.Disabled
-			pool.FiveHour.UnavailableReason = ""
-			pool.FiveHour.RemainingFraction = clonePointer(pool.Weekly.RemainingFraction)
-			pool.FiveHour.RemainingPercent = clonePointer(pool.Weekly.RemainingPercent)
-			pool.FiveHour.UsedPercent = clonePointer(pool.Weekly.UsedPercent)
-			pool.FiveHour.RemainingAmount = clonePointer(pool.Weekly.RemainingAmount)
-			pool.FiveHour.ResetAt = clonePointer(pool.Weekly.ResetAt)
-		}
+
+	buckets := make([]Bucket, 0, len(parsedBuckets))
+	for _, b := range parsedBuckets {
+		buckets = append(buckets, b)
 	}
+	slices.SortFunc(buckets, func(a, b Bucket) int {
+		return strings.Compare(a.ID, b.ID)
+	})
+
+	snapshot.Buckets = buckets
 	return snapshot, nil
 }
 
-func missing(id, window string) Window {
-	return Window{BucketID: id, Window: window, Status: StatusUnavailable, UnavailableReason: "not_reported"}
+func bucketSignature(raw rawBucket) string {
+	if !present(raw.Disabled) {
+		raw.Disabled = json.RawMessage("false")
+	}
+	values := []json.RawMessage{raw.Window, raw.Disabled, raw.RemainingFraction, raw.RemainingAmount, raw.ResetTime, raw.DisplayName}
+	canonical := make([]string, 0, len(values))
+	for _, value := range values {
+		if !present(value) {
+			canonical = append(canonical, "null")
+			continue
+		}
+		var decoded any
+		if err := json.Unmarshal(value, &decoded); err != nil {
+			canonical = append(canonical, string(bytes.TrimSpace(value)))
+		} else {
+			encoded, _ := json.Marshal(decoded)
+			canonical = append(canonical, string(encoded))
+		}
+	}
+	encoded, _ := json.Marshal(canonical)
+	return string(encoded)
+}
+
+func parseBucket(raw rawBucket, groupName string) (Bucket, error) {
+	var id string
+	if err := json.Unmarshal(raw.BucketID, &id); err != nil || strings.TrimSpace(id) == "" {
+		return Bucket{}, errors.New("invalid or missing bucketId")
+	}
+
+	var displayName string
+	if present(raw.DisplayName) {
+		_ = json.Unmarshal(raw.DisplayName, &displayName)
+	}
+
+	reason := ""
+	var window string
+	if present(raw.Window) {
+		if json.Unmarshal(raw.Window, &window) != nil {
+			reason = "invalid_window"
+		}
+	}
+	var disabled bool
+	if present(raw.Disabled) {
+		if json.Unmarshal(raw.Disabled, &disabled) != nil {
+			reason = "invalid_disabled"
+		}
+	}
+
+	var resetAt *time.Time
+	if present(raw.ResetTime) {
+		var val string
+		if json.Unmarshal(raw.ResetTime, &val) != nil {
+			reason = "invalid_reset_time"
+		} else if parsed, err := time.Parse(time.RFC3339Nano, val); err != nil {
+			reason = "invalid_reset_time"
+		} else {
+			resetAt = &parsed
+		}
+	}
+
+	var remainingAmount *string
+	if present(raw.RemainingAmount) {
+		var val string
+		if json.Unmarshal(raw.RemainingAmount, &val) != nil {
+			reason = "invalid_remaining_amount"
+		} else if _, err := strconv.ParseInt(val, 10, 64); err != nil {
+			reason = "invalid_remaining_amount"
+		} else {
+			remainingAmount = &val
+		}
+	}
+
+	var remainingFraction *float64
+	if present(raw.RemainingFraction) {
+		var val float64
+		if json.Unmarshal(raw.RemainingFraction, &val) != nil || math.IsNaN(val) || math.IsInf(val, 0) || val < 0 || val > 1 {
+			reason = "invalid_remaining_fraction"
+		} else {
+			remainingFraction = &val
+		}
+	}
+
+	status := StatusAvailable
+	unavailableReason := ""
+	if disabled {
+		status = StatusDisabled
+		unavailableReason = "upstream_disabled"
+		remainingAmount = nil
+		remainingFraction = nil
+	} else if reason != "" {
+		status = StatusUnavailable
+		unavailableReason = reason
+		remainingAmount = nil
+		remainingFraction = nil
+	} else if remainingFraction == nil && remainingAmount == nil {
+		status = StatusUnavailable
+		unavailableReason = "quota_not_reported"
+	}
+
+	return Bucket{
+		ID:                id,
+		PoolDisplayName:   groupName,
+		Window:            window,
+		DisplayName:       displayName,
+		Status:            status,
+		RemainingFraction: remainingFraction,
+		RemainingAmount:   remainingAmount,
+		ResetAt:           resetAt,
+		UnavailableReason: unavailableReason,
+	}, nil
 }
 
 func collectBuckets(body []byte, depth int, buckets *[]reportedBucket) error {
@@ -180,96 +251,4 @@ func collectBuckets(body []byte, depth int, buckets *[]reportedBucket) error {
 
 func present(raw json.RawMessage) bool {
 	return len(raw) != 0 && !bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
-}
-
-func parseWindow(raw rawBucket, window Window) Window {
-	reason := ""
-	if present(raw.Window) {
-		var value string
-		if json.Unmarshal(raw.Window, &value) != nil || value != window.Window {
-			reason = "invalid_window"
-		}
-	}
-	if present(raw.Disabled) {
-		if json.Unmarshal(raw.Disabled, &window.Disabled) != nil {
-			reason = "invalid_disabled"
-		}
-	}
-	if present(raw.ResetTime) {
-		var value string
-		if json.Unmarshal(raw.ResetTime, &value) != nil {
-			reason = "invalid_reset_time"
-		} else if reset, err := time.Parse(time.RFC3339Nano, value); err != nil {
-			reason = "invalid_reset_time"
-		} else {
-			window.ResetAt = &reset
-		}
-	}
-	if present(raw.RemainingAmount) {
-		var value string
-		if json.Unmarshal(raw.RemainingAmount, &value) != nil {
-			reason = "invalid_remaining_amount"
-		} else if _, err := strconv.ParseInt(value, 10, 64); err != nil {
-			reason = "invalid_remaining_amount"
-		} else {
-			window.RemainingAmount = &value
-		}
-	}
-	var fraction *float64
-	if present(raw.RemainingFraction) {
-		var value float64
-		if json.Unmarshal(raw.RemainingFraction, &value) != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 1 {
-			reason = "invalid_remaining_fraction"
-		} else {
-			fraction = &value
-		}
-	}
-	if window.Disabled {
-		window.Status, window.UnavailableReason = StatusDisabled, "upstream_disabled"
-		window.RemainingAmount = nil
-		return window
-	}
-	if reason != "" {
-		window.UnavailableReason = reason
-		return window
-	}
-	if fraction == nil && window.RemainingAmount == nil {
-		window.UnavailableReason = "quota_not_reported"
-		return window
-	}
-	window.Status, window.UnavailableReason = StatusAvailable, ""
-	if fraction != nil {
-		window.RemainingFraction = fraction
-		remaining, used := *fraction*100, (1-*fraction)*100
-		window.RemainingPercent, window.UsedPercent = &remaining, &used
-	}
-	return window
-}
-
-// Signatures compare source fields, including malformed values, so invalid
-// duplicates cannot hide a conflict behind the same unavailable status.
-func bucketSignature(raw rawBucket, nominalWindow string) string {
-	if !present(raw.Window) {
-		raw.Window, _ = json.Marshal(nominalWindow)
-	}
-	if !present(raw.Disabled) {
-		raw.Disabled = json.RawMessage("false")
-	}
-	values := []json.RawMessage{raw.Window, raw.Disabled, raw.RemainingFraction, raw.RemainingAmount, raw.ResetTime, raw.DisplayName}
-	canonical := make([]string, 0, len(values))
-	for _, value := range values {
-		if !present(value) {
-			canonical = append(canonical, "null")
-			continue
-		}
-		var decoded any
-		if err := json.Unmarshal(value, &decoded); err != nil {
-			canonical = append(canonical, string(bytes.TrimSpace(value)))
-		} else {
-			encoded, _ := json.Marshal(decoded)
-			canonical = append(canonical, string(encoded))
-		}
-	}
-	encoded, _ := json.Marshal(canonical)
-	return string(encoded)
 }

@@ -67,17 +67,28 @@ func TestFetchQuotaSnapshotObservesAvailableDisabledMissingAndRecovery(t *testin
 		body   string
 		status WindowStatus
 	}{
-		{`{"buckets":[{"bucketId":"3p-weekly","disabled":true}]}`, "disabled"},
-		{`{"buckets":[]}`, "unavailable"},
-		{`{"buckets":[{"bucketId":"3p-weekly","remainingFraction":"bad"}]}`, "unavailable"},
-		{`{"buckets":[{"bucketId":"3p-weekly","remainingFraction":1}]}`, "available"},
+		{`{"buckets":[{"bucketId":"3p-weekly","disabled":true}]}`, StatusDisabled},
+		{`{"buckets":[]}`, ""},
+		{`{"buckets":[{"bucketId":"3p-weekly","remainingFraction":"bad"}]}`, StatusUnavailable},
+		{`{"buckets":[{"bucketId":"3p-weekly","remainingFraction":1}]}`, StatusAvailable},
 	} {
 		response.Store(test.body)
 		snapshot, err := fetcher.Fetch(context.Background())
-		if err != nil || snapshot.Pools.ThirdParty.Weekly.Status != test.status {
-			t.Fatalf("state = %+v, error = %v", snapshot.Pools.ThirdParty.Weekly, err)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if *first.Pools.ThirdParty.Weekly.RemainingFraction != 0 || first.Pools.ThirdParty.Weekly.Status != "available" {
+		b, found := snapshot.Bucket("3p-weekly")
+		if test.status == "" {
+			if found {
+				t.Fatalf("expected 3p-weekly not found, got %+v", b)
+			}
+		} else {
+			if !found || b.Status != test.status {
+				t.Fatalf("state = %+v, want status %v", b, test.status)
+			}
+		}
+		firstB, _ := first.Bucket("3p-weekly")
+		if *firstB.RemainingFraction != 0 || firstB.Status != StatusAvailable {
 			t.Fatal("subsequent fetch mutated earlier quota observation")
 		}
 	}

@@ -72,8 +72,12 @@ func TestFetchQuotaSnapshotUsesUnifiedIdentityWithoutProvisioning(t *testing.T) 
 			if requests.Load() != 1 || snapshot.Source != "retrieveUserQuotaSummary" || snapshot.ObservedAt.Before(before) || snapshot.ObservedAt.After(time.Now()) {
 				t.Fatalf("observation metadata/requests = %+v / %d", snapshot, requests.Load())
 			}
-			if *snapshot.Pools.Gemini.FiveHour.RemainingFraction != 0 || *snapshot.Pools.Gemini.Weekly.RemainingFraction != 0.8 || *snapshot.Pools.ThirdParty.FiveHour.RemainingFraction != 0.4 || *snapshot.Pools.ThirdParty.Weekly.RemainingFraction != 0.6 {
-				t.Fatalf("fetched pool/window mapping = %+v", snapshot.Pools)
+			g5h, _ := snapshot.Bucket("gemini-5h")
+			gw, _ := snapshot.Bucket("gemini-weekly")
+			tp5h, _ := snapshot.Bucket("3p-5h")
+			tpw, _ := snapshot.Bucket("3p-weekly")
+			if *g5h.RemainingFraction != 0 || *gw.RemainingFraction != 0.8 || *tp5h.RemainingFraction != 0.4 || *tpw.RemainingFraction != 0.6 {
+				t.Fatalf("fetched pool/window mapping = %+v", snapshot.Buckets)
 			}
 			encoded, _ := json.Marshal(snapshot)
 			if strings.Contains(string(encoded), cfg.AccessToken) || strings.Contains(string(encoded), "configured-project") || strings.Contains(string(encoded), "cached-project") {
@@ -237,7 +241,8 @@ func TestFetchQuotaSnapshotDoesNotWaitForProjectDiscovery(t *testing.T) {
 			go func() {
 				defer close(quotaDone)
 				snapshot, err := p.QuotaFetcher().Fetch(ctx)
-				if err == nil && snapshot.Pools.Gemini.FiveHour.Status != "available" {
+				g5h, found := snapshot.Bucket("gemini-5h")
+				if err == nil && (!found || g5h.Status != "available") {
 					err = fmt.Errorf("quota returned incorrect snapshot")
 				}
 				result <- err
@@ -360,7 +365,8 @@ func TestQuotaCollectorCloseDoesNotWaitForUnrelatedTokenRefresh(t *testing.T) {
 	p.tokens.mu.Unlock()
 	locked = false
 	snapshot, err := p.QuotaFetcher().Fetch(context.Background())
-	if err != nil || snapshot.Pools.Gemini.FiveHour.Status != "available" || quotaCalls.Load() != 1 {
+	g5h, found := snapshot.Bucket("gemini-5h")
+	if err != nil || !found || g5h.Status != "available" || quotaCalls.Load() != 1 {
 		t.Fatalf("following cached-token quota poll = %+v, error = %v, calls = %d", snapshot, err, quotaCalls.Load())
 	}
 }

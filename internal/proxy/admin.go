@@ -608,10 +608,11 @@ func (r *Runtime) handleAdminQuotaOverview(w http.ResponseWriter, req *http.Requ
 	}
 
 	type accountQuotaEntry struct {
-		ID      string          `json:"id"`
-		Pools   quota.Pools     `json:"pools,omitempty"`
-		Stale   bool            `json:"stale"`
-		Polling status.PollInfo `json:"polling"`
+		ID         string          `json:"id"`
+		ObservedAt *time.Time      `json:"observed_at,omitempty"`
+		Buckets    []quota.Bucket  `json:"buckets,omitempty"`
+		Stale      bool            `json:"stale"`
+		Polling    status.PollInfo `json:"polling"`
 	}
 
 	results := make([]accountQuotaEntry, 0)
@@ -643,10 +644,11 @@ func (r *Runtime) handleAdminQuotaOverview(w http.ResponseWriter, req *http.Requ
 			continue
 		}
 		entry := accountQuotaEntry{
-			ID:      id,
-			Pools:   snap.Pools,
-			Stale:   status.SnapshotStale(snap.ObservedAt, interval, polling.LastError, now),
-			Polling: polling,
+			ID:         id,
+			ObservedAt: &snap.ObservedAt,
+			Buckets:    snap.Buckets,
+			Stale:      status.SnapshotStale(snap.ObservedAt, interval, polling.LastError, now),
+			Polling:    polling,
 		}
 		results = append(results, entry)
 	}

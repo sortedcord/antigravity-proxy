@@ -234,7 +234,7 @@ func parseUsageQuery(raw string) (Query, error) {
 			} else {
 				query.To = &parsed
 			}
-		case "pool":
+		case "pool", "group":
 			query.Pool = value
 		case "window":
 			query.Window = value
