@@ -116,6 +116,20 @@ func Parse(body []byte, observedAt time.Time) (Snapshot, error) {
 		seen[id] = reported.bucket
 		*target = parseWindow(reported.bucket, *target)
 	}
+	// For tiers that only report weekly limits (e.g. Google AI Plus), synthesize the
+	// 5-hour window from the weekly window so clients, UIs, and gateways see available quota.
+	for _, pool := range []*Pool{&snapshot.Pools.Gemini, &snapshot.Pools.ThirdParty} {
+		if pool.FiveHour.Status == StatusUnavailable && pool.FiveHour.UnavailableReason == "not_reported" && pool.Weekly.Status == StatusAvailable {
+			pool.FiveHour.Status = StatusAvailable
+			pool.FiveHour.Disabled = pool.Weekly.Disabled
+			pool.FiveHour.UnavailableReason = ""
+			pool.FiveHour.RemainingFraction = clonePointer(pool.Weekly.RemainingFraction)
+			pool.FiveHour.RemainingPercent = clonePointer(pool.Weekly.RemainingPercent)
+			pool.FiveHour.UsedPercent = clonePointer(pool.Weekly.UsedPercent)
+			pool.FiveHour.RemainingAmount = clonePointer(pool.Weekly.RemainingAmount)
+			pool.FiveHour.ResetAt = clonePointer(pool.Weekly.ResetAt)
+		}
+	}
 	return snapshot, nil
 }
 

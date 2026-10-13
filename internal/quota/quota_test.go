@@ -196,3 +196,60 @@ func TestParseSuccessiveStatesDoNotMutateEarlierObservation(t *testing.T) {
 		t.Fatal("independent snapshots share mutable values")
 	}
 }
+
+func TestParseWeeklyOnlyTierSynthesizesFiveHourWindow(t *testing.T) {
+	raw := `{
+		"groups": [
+			{
+				"displayName": "Gemini Models",
+				"buckets": [
+					{
+						"bucketId": "gemini-weekly",
+						"window": "weekly",
+						"remainingFraction": 0.85,
+						"resetTime": "2026-10-20T11:13:52Z"
+					}
+				]
+			},
+			{
+				"displayName": "Claude and GPT models",
+				"buckets": [
+					{
+						"bucketId": "3p-weekly",
+						"window": "weekly",
+						"remainingFraction": 0.95,
+						"resetTime": "2026-10-20T11:24:12Z"
+					}
+				]
+			}
+		]
+	}`
+
+	snapshot, err := Parse([]byte(raw), quotaTestTime())
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if err := snapshot.Validate(); err != nil {
+		t.Fatalf("Validate failed: %v", err)
+	}
+
+	// Gemini FiveHour must mirror Gemini Weekly
+	g5h := snapshot.Pools.Gemini.FiveHour
+	gw := snapshot.Pools.Gemini.Weekly
+	if g5h.Status != StatusAvailable || g5h.RemainingFraction == nil || *g5h.RemainingFraction != 0.85 {
+		t.Fatalf("unexpected Gemini FiveHour: %+v", g5h)
+	}
+	if *g5h.RemainingPercent != *gw.RemainingPercent || !g5h.ResetAt.Equal(*gw.ResetAt) {
+		t.Fatalf("Gemini FiveHour should match Weekly: 5h=%+v, weekly=%+v", g5h, gw)
+	}
+
+	// ThirdParty FiveHour must mirror ThirdParty Weekly
+	tp5h := snapshot.Pools.ThirdParty.FiveHour
+	tpw := snapshot.Pools.ThirdParty.Weekly
+	if tp5h.Status != StatusAvailable || tp5h.RemainingFraction == nil || *tp5h.RemainingFraction != 0.95 {
+		t.Fatalf("unexpected ThirdParty FiveHour: %+v", tp5h)
+	}
+	if *tp5h.RemainingPercent != *tpw.RemainingPercent || !tp5h.ResetAt.Equal(*tpw.ResetAt) {
+		t.Fatalf("ThirdParty FiveHour should match Weekly: 5h=%+v, weekly=%+v", tp5h, tpw)
+	}
+}
