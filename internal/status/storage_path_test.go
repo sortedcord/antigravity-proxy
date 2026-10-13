@@ -36,7 +36,7 @@ func TestHistoryRejectsFinalSymlinksBeforeCreatingLock(t *testing.T) {
 			sample := observation(observationTime(), 0.5)
 			data := encodeHistory(t, []quota.Snapshot{sample})
 			if exists {
-				if err := os.WriteFile(target, data, 0600); err != nil {
+				if err := os.WriteFile(target, data, 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -70,7 +70,7 @@ func TestHistoryRejectsCompanionLockSymlink(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "history")
 	target := filepath.Join(dir, "unrelated-lock")
-	if err := os.WriteFile(target, []byte("do not change"), 0600); err != nil {
+	if err := os.WriteFile(target, []byte("do not change"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	createHistorySymlink(t, target, path+".lock")
@@ -89,7 +89,7 @@ func TestHistoryParentSymlinkAliasesSharePersistentLock(t *testing.T) {
 	dir := t.TempDir()
 	parent := filepath.Join(dir, "real")
 	alias := filepath.Join(dir, "alias")
-	if err := os.Mkdir(parent, 0700); err != nil {
+	if err := os.Mkdir(parent, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	createHistorySymlink(t, parent, alias)
@@ -150,7 +150,7 @@ func TestHistoryReplacementRejectsSymlinkIntroducedAfterOpen(t *testing.T) {
 		if err := os.Rename(path, target); err != nil {
 			return err
 		}
-		file, err := os.OpenFile(target, os.O_RDWR|os.O_APPEND, 0600)
+		file, err := os.OpenFile(target, os.O_RDWR|os.O_APPEND, 0o600)
 		if err != nil {
 			return err
 		}
@@ -203,7 +203,7 @@ func TestStartupRemovesOnlyOwnAbandonedHistoryCopiesUnderLock(t *testing.T) {
 	legacy := createAbandonedHistoryCopy(t, dir, ".quota-history-")
 	unrelated := createAbandonedHistoryCopy(t, dir, "unrelated-")
 	matchingDirectory := filepath.Join(dir, owner.tempPrefix+"directory")
-	if err := os.Mkdir(matchingDirectory, 0700); err != nil {
+	if err := os.Mkdir(matchingDirectory, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	var ownCopies []string
@@ -261,11 +261,14 @@ func TestHistoryCrashCopyProcessHelper(t *testing.T) {
 }
 
 func TestStartupCleansPrivateCopyLeftByTerminatedProcess(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping process crash test in short mode")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "history")
 	sample := observation(observationTime(), 0.5)
 	data := encodeHistory(t, []quota.Snapshot{sample})
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	other := openRetainedCollector(t, filepath.Join(dir, "other"), 1, func(context.Context) (quota.Snapshot, error) { return sample, nil })

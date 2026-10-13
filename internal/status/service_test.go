@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"antigravity-proxy/internal/testutil"
+
 	"antigravity-proxy/internal/config"
 	"antigravity-proxy/internal/quota"
 )
@@ -51,22 +53,12 @@ func requestStatus(t *testing.T, client *http.Client, address, key string, targe
 
 func waitForLimit(t *testing.T, client *http.Client, address, key string, fraction float64) limitResponse {
 	t.Helper()
-	deadline := time.NewTimer(5 * time.Second)
-	defer deadline.Stop()
-	tick := time.NewTicker(5 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		var response limitResponse
+	var response limitResponse
+	testutil.Eventually(t, func() bool {
 		code := requestStatus(t, client, address+"/status/limit", key, &response)
-		if code == http.StatusOK && response.Pools.Gemini.FiveHour.RemainingFraction != nil && *response.Pools.Gemini.FiveHour.RemainingFraction == fraction {
-			return response
-		}
-		select {
-		case <-deadline.C:
-			t.Fatalf("quota observation %.2f not published: status=%d response=%+v", fraction, code, response)
-		case <-tick.C:
-		}
-	}
+		return code == http.StatusOK && response.Pools.Gemini.FiveHour.RemainingFraction != nil && *response.Pools.Gemini.FiveHour.RemainingFraction == fraction
+	}, "quota observation was not published")
+	return response
 }
 
 func TestQuotaStatusPollingHistoryAndRestartHTTP(t *testing.T) {
@@ -293,11 +285,7 @@ func newUpstreamService(cfg config.Config) *Service {
 
 func awaitStatusSignal(t *testing.T, signal <-chan struct{}, failure string) {
 	t.Helper()
-	select {
-	case <-signal:
-	case <-time.After(3 * time.Second):
-		t.Fatal(failure)
-	}
+	testutil.Await(t, signal, failure)
 }
 
 func TestServicePrepareWithoutPollingAndCloseReleasesHistory(t *testing.T) {
@@ -312,7 +300,8 @@ func TestServicePrepareWithoutPollingAndCloseReleasesHistory(t *testing.T) {
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("constructor opened history: %v", err)
 	}
-	if err := service.Start(nil); err == nil {
+	var nilCtx context.Context
+	if err := service.Start(nilCtx); err == nil {
 		t.Fatal("Start accepted nil context")
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -369,7 +358,7 @@ func TestServiceFailedPreparationLeavesIndependentActiveServiceUsable(t *testing
 	collector := active.quotaCollector()
 	awaitState(t, collector, func(_ quota.Snapshot, exists bool, _ PollInfo) bool { return exists })
 	blocked := filepath.Join(dir, "not-a-directory")
-	if err := os.WriteFile(blocked, []byte("keep"), 0600); err != nil {
+	if err := os.WriteFile(blocked, []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	candidate := NewService(config.Config{QuotaHistoryPath: filepath.Join(blocked, "candidate.jsonl")}, func(context.Context) (quota.Snapshot, error) {
@@ -399,7 +388,7 @@ func TestServiceFailedPreparationLeavesIndependentActiveServiceUsable(t *testing
 func TestAccountHistoryPathsSeparateAndReloadPreparedHistory(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "history.jsonl")
 	legacy := []byte("legacy history must remain untouched\n")
-	if err := os.WriteFile(base, legacy, 0600); err != nil {
+	if err := os.WriteFile(base, legacy, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	firstPath := AccountHistoryPath(base, "../private/account")

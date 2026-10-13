@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"antigravity-proxy/internal/testutil"
+
 	"antigravity-proxy/internal/config"
 )
 
@@ -333,17 +335,11 @@ func TestProjectDiscoveryUsesDailyAndRetryPolicy(t *testing.T) {
 
 func waitForProjectWaiters(t *testing.T, p *Proxy, count int) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
+	testutil.Eventually(t, func() bool {
 		p.projectMu.Lock()
-		joined := p.projectFlight != nil && p.projectFlight.waiters == count
-		p.projectMu.Unlock()
-		if joined {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("discovery callers did not join shared request")
+		defer p.projectMu.Unlock()
+		return p.projectFlight != nil && p.projectFlight.waiters == count
+	}, "discovery callers did not join shared request")
 }
 
 func TestDiscoveryInitiatorCancellationDoesNotAbortOtherWaiters(t *testing.T) {

@@ -18,22 +18,13 @@ import (
 	"testing"
 	"time"
 
+	"antigravity-proxy/internal/testutil"
+
 	"antigravity-proxy/internal/config"
 	"antigravity-proxy/internal/oauth"
 	"antigravity-proxy/internal/quota"
 	"antigravity-proxy/internal/status"
 )
-
-type runtimeTransport struct {
-	target *url.URL
-	base   http.RoundTripper
-}
-
-func (tr runtimeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	clone := req.Clone(req.Context())
-	clone.URL.Scheme, clone.URL.Host = tr.target.Scheme, tr.target.Host
-	return tr.base.RoundTrip(clone)
-}
 
 type runtimeProvider struct {
 	server          *httptest.Server
@@ -115,7 +106,7 @@ func newRuntimeProvider(t *testing.T) *runtimeProvider {
 	if err != nil {
 		t.Fatal(err)
 	}
-	provider.client = &http.Client{Transport: runtimeTransport{target: target, base: http.DefaultTransport}, Timeout: 3 * time.Second}
+	provider.client = &http.Client{Transport: testutil.RedirectTransport(http.DefaultTransport, target), Timeout: 3 * time.Second}
 	return provider
 }
 
@@ -215,19 +206,15 @@ func requireNativeAccount(t *testing.T, r http.Handler, token, project string) {
 
 func waitQuota(t *testing.T, r *Runtime, fraction float64) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
+	testutil.Eventually(t, func() bool {
 		response := runtimeRequest(r, http.MethodGet, "/status/limit", nil)
 		var snapshot quota.Snapshot
-		if response.Code == 200 && json.Unmarshal(response.Body.Bytes(), &snapshot) == nil {
-			value := snapshot.Pools.Gemini.FiveHour.RemainingFraction
-			if value != nil && *value == fraction {
-				return
-			}
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &snapshot) != nil {
+			return false
 		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("expected account quota was not observed")
+		value := snapshot.Pools.Gemini.FiveHour.RemainingFraction
+		return value != nil && *value == fraction
+	}, "expected account quota was not observed")
 }
 
 func TestRuntimeLoginReplacesStartupTokenAndPreservesRefresh(t *testing.T) {
@@ -259,10 +246,10 @@ func TestRuntimeLoginReplacesStartupTokenAndPreservesRefresh(t *testing.T) {
 		t.Fatalf("consumed state accepted: %d", replay.Code)
 	}
 	leaf := r.active.Load().proxy
-	leaf.tokenMu.Lock()
-	remaining := time.Until(leaf.tokenExpiresAt)
-	leaf.tokenExpiresAt = time.Now().Add(-time.Second)
-	leaf.tokenMu.Unlock()
+	leaf.tokens.mu.Lock()
+	remaining := time.Until(leaf.tokens.expiresAt)
+	leaf.tokens.expiresAt = time.Now().Add(-time.Second)
+	leaf.tokens.mu.Unlock()
 	if remaining > 120*time.Second || remaining < 110*time.Second {
 		t.Fatalf("reported token lifetime not honored: %v", remaining)
 	}
@@ -332,7 +319,7 @@ func TestRuntimeHistoryRestartsInPersistedAccountNamespace(t *testing.T) {
 	provider := newRuntimeProvider(t)
 	cfg, path := runtimeConfig(t, provider)
 	legacy := []byte("legacy history remains unattributed\n")
-	if err := os.WriteFile(cfg.QuotaHistoryPath, legacy, 0600); err != nil {
+	if err := os.WriteFile(cfg.QuotaHistoryPath, legacy, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	r := startRuntime(t, cfg, path, provider)
@@ -396,7 +383,7 @@ func TestRuntimePreparationAndPersistenceFailurePreserveOldAccount(t *testing.T)
 				t.Fatal(err)
 			}
 			if stage == "history" {
-				if err := os.Mkdir(status.AccountHistoryPath(cfg.QuotaHistoryPath, "google:b"), 0700); err != nil {
+				if err := os.Mkdir(status.AccountHistoryPath(cfg.QuotaHistoryPath, "google:b"), 0o700); err != nil {
 					t.Fatal(err)
 				}
 			} else {
@@ -690,15 +677,18 @@ func TestRuntimeIdentityPromotionDoesNotExtendExpiredCachedToken(t *testing.T) {
 	r := startRuntime(t, cfg, path, provider)
 	r.background.Wait()
 	initial := r.active.Load()
-	initial.proxy.tokenMu.Lock()
-	initial.proxy.cachedToken = "token-b-expired"
-	initial.proxy.tokenExpiresAt = time.Now().Add(-time.Second)
-	initial.proxy.tokenMu.Unlock()
+	initial.proxy.tokens.mu.Lock()
+	initial.proxy.tokens.cachedToken = "token-b-expired"
+	initial.proxy.tokens.expiresAt = time.Now().Add(-time.Second)
+	initial.proxy.tokens.mu.Unlock()
 	before := provider.refreshCalls.Load()
 	if err := r.promoteIdentity(context.Background(), initial, oauth.UserInfo{ID: "b", Email: "b@example.invalid", Name: "Account b"}); err != nil {
 		t.Fatal(err)
 	}
 	requireNativeAccount(t, r, "token-b-renewed", "project-b")
+	// Startup polls may skip a refresh owned by the native request. Request a
+	// new poll after it finishes instead of waiting for the hourly schedule.
+	r.active.Load().status.TriggerPoll()
 	waitQuota(t, r, .75)
 	if provider.refreshCalls.Load() != before+1 {
 		t.Fatal("expired startup token did not refresh exactly once after promotion")

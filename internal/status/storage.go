@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 
+	"antigravity-proxy/internal/atomicfile"
 	"antigravity-proxy/internal/quota"
 )
 
@@ -26,7 +27,7 @@ type historyStorage struct {
 }
 
 func defaultHistoryStorage() historyStorage {
-	return historyStorage{syncFile: (*os.File).Sync, replace: replaceHistoryFile, syncDir: syncHistoryDirectory}
+	return historyStorage{syncFile: (*os.File).Sync, replace: atomicfile.Replace, syncDir: atomicfile.SyncDir}
 }
 
 func inspectHistoryPath(path string) error {
@@ -116,7 +117,7 @@ func (c *Collector) loadHistory(file *os.File) error {
 			if err := json.Unmarshal(record, &sample); err != nil {
 				return fmt.Errorf("quota history line %d: %w", line, err)
 			}
-			if err := validateSnapshot(sample); err != nil {
+			if err := sample.Validate(); err != nil {
 				return fmt.Errorf("quota history line %d: %w", line, err)
 			}
 			if len(c.samples) < c.maxSamples {
@@ -179,7 +180,8 @@ func (c *Collector) replaceHistory(samples []quota.Snapshot, next *quota.Snapsho
 	name := temp.Name()
 	defer os.Remove(name)
 	defer temp.Close()
-	encoder := json.NewEncoder(temp)
+	writer := bufio.NewWriterSize(temp, 64<<10)
+	encoder := json.NewEncoder(writer)
 	for _, sample := range samples {
 		if err := encoder.Encode(sample); err != nil {
 			return fmt.Errorf("write compacted quota history: %w", err)
@@ -189,6 +191,9 @@ func (c *Collector) replaceHistory(samples []quota.Snapshot, next *quota.Snapsho
 		if err := encoder.Encode(next); err != nil {
 			return fmt.Errorf("write compacted quota history: %w", err)
 		}
+	}
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("flush compacted quota history: %w", err)
 	}
 	if err := c.storage.syncFile(temp); err != nil {
 		return fmt.Errorf("sync compacted quota history: %w", err)
@@ -212,7 +217,7 @@ func (c *Collector) replaceHistory(samples []quota.Snapshot, next *quota.Snapsho
 	if replaceErr == nil {
 		durabilityErr = c.storage.syncDir(dir)
 	}
-	file, openErr := os.OpenFile(c.path, os.O_RDWR, 0600)
+	file, openErr := os.OpenFile(c.path, os.O_RDWR, 0o600)
 	if openErr == nil {
 		c.file = file
 	}
@@ -279,7 +284,7 @@ func lockHistory(path string) (*historyLock, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("inspect quota history lock: %w", err)
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open quota history lock: %w", err)
 	}
@@ -291,7 +296,7 @@ func lockHistory(path string) (*historyLock, error) {
 	if err != nil || !info.Mode().IsRegular() {
 		return fail(errors.New("quota history lock must be a regular file"))
 	}
-	if err := file.Chmod(0600); err != nil {
+	if err := file.Chmod(0o600); err != nil {
 		return fail(fmt.Errorf("protect quota history lock: %w", err))
 	}
 	if err := lockHistoryFile(file); err != nil {

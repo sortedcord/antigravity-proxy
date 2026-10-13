@@ -14,6 +14,18 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"antigravity-proxy/internal/atomicfile"
+)
+
+const (
+	// DefaultPort is the default local HTTP port.
+	DefaultPort = 8080
+	// DefaultHost keeps the listener private unless explicitly configured.
+	DefaultHost = "127.0.0.1"
+	// DefaultDailyEndpoint and DefaultProdEndpoint identify Cloud Code origins.
+	DefaultDailyEndpoint = "https://daily-cloudcode-pa.googleapis.com"
+	DefaultProdEndpoint  = "https://cloudcode-pa.googleapis.com"
 )
 
 // DefaultQuotaPollIntervalSeconds is the default interval between quota observations.
@@ -95,41 +107,42 @@ func Load() (Config, string, error) {
 		return Config{}, "", err
 	}
 	path := filepath.Join(home, ".config", "antigravity-proxy", "config.json")
-	cfg := Config{
-		Port:                     8080,
-		Host:                     "127.0.0.1",
+	cfg := defaults(home)
+	if _, err := readConfig(path, &cfg); err != nil {
+		return Config{}, "", err
+	}
+	if err := cfg.applyEnvironment(); err != nil {
+		return Config{}, "", err
+	}
+	cfg.normalize()
+	if err := cfg.Validate(); err != nil {
+		return Config{}, "", err
+	}
+	return cfg, path, nil
+}
+
+func defaults(home string) Config {
+	return Config{
+		Port:                     DefaultPort,
+		Host:                     DefaultHost,
 		QuotaPollIntervalSeconds: DefaultQuotaPollIntervalSeconds,
 		QuotaHistoryPath:         filepath.Join(home, ".local", "share", "antigravity-proxy", "usage.jsonl"),
 		QuotaHistoryMaxSamples:   DefaultQuotaHistoryMaxSamples,
 		ClientVersion:            DefaultClientVersion,
 		MaxConcurrentGenerations: DefaultMaxConcurrentGenerations,
 	}
-	if _, err := readConfig(path, &cfg); err != nil {
-		return Config{}, "", err
-	}
-	if cfg.Port == 0 {
-		cfg.Port = 8080
-	}
-	if cfg.Host == "" {
-		cfg.Host = "127.0.0.1"
-	}
+}
+
+func (cfg *Config) applyEnvironment() error {
 	envString("HOST", &cfg.Host)
-	cfg.Host = strings.TrimSpace(cfg.Host)
-	if cfg.Host == "" {
-		cfg.Host = "127.0.0.1"
-	}
 	if value := os.Getenv("PORT"); value != "" {
 		port, err := strconv.Atoi(value)
 		if err != nil || port < 1 || port > 65535 {
-			return Config{}, "", fmt.Errorf("PORT must be an integer from 1 to 65535")
+			return fmt.Errorf("PORT must be an integer from 1 to 65535")
 		}
 		cfg.Port = port
 	}
 	envString("API_KEY", &cfg.APIKey)
-	cfg.APIKey = strings.TrimSpace(cfg.APIKey)
-	if err := validateListenAddress(cfg.Host, cfg.APIKey); err != nil {
-		return Config{}, "", err
-	}
 	accessToken, accessSet := os.LookupEnv("ANTIGRAVITY_ACCESS_TOKEN")
 	refreshToken, refreshSet := os.LookupEnv("ANTIGRAVITY_REFRESH_TOKEN")
 	if accessSet {
@@ -145,42 +158,18 @@ func Load() (Config, string, error) {
 	// Login and Refresh validate the selected pair when OAuth is actually needed.
 	if id, secret, provided := oauthEnvironmentPair(); provided {
 		cfg.OAuthClientID, cfg.OAuthClientSecret = id, secret
-	} else {
-		cfg.OAuthClientID = strings.TrimSpace(cfg.OAuthClientID)
-		cfg.OAuthClientSecret = strings.TrimSpace(cfg.OAuthClientSecret)
 	}
 	envString("ANTIGRAVITY_PROJECT_ID", &cfg.ProjectID)
 	envString("ANTIGRAVITY_DAILY_ENDPOINT", &cfg.DailyEndpoint)
 	envString("ANTIGRAVITY_PROD_ENDPOINT", &cfg.ProdEndpoint)
-	if cfg.DailyEndpoint == "" {
-		cfg.DailyEndpoint = "https://daily-cloudcode-pa.googleapis.com"
-	}
-	if cfg.ProdEndpoint == "" {
-		cfg.ProdEndpoint = "https://cloudcode-pa.googleapis.com"
-	}
-	cfg.DailyEndpoint = strings.TrimRight(cfg.DailyEndpoint, "/")
-	cfg.ProdEndpoint = strings.TrimRight(cfg.ProdEndpoint, "/")
-	if err := validateCloudEndpoint("ANTIGRAVITY_DAILY_ENDPOINT", cfg.DailyEndpoint); err != nil {
-		return Config{}, "", err
-	}
-	if err := validateCloudEndpoint("ANTIGRAVITY_PROD_ENDPOINT", cfg.ProdEndpoint); err != nil {
-		return Config{}, "", err
-	}
 	if value, ok := os.LookupEnv("ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS"); ok {
 		seconds, err := strconv.Atoi(value)
 		if err != nil {
-			return Config{}, "", fmt.Errorf("ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS must be a positive integer number of seconds")
+			return fmt.Errorf("ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS must be a positive integer number of seconds")
 		}
 		cfg.QuotaPollIntervalSeconds = seconds
 	}
-	const maxQuotaPollIntervalSeconds = int64((1<<63 - 1) / time.Second)
-	if cfg.QuotaPollIntervalSeconds <= 0 || int64(cfg.QuotaPollIntervalSeconds) > maxQuotaPollIntervalSeconds {
-		return Config{}, "", fmt.Errorf("quotaPollIntervalSeconds must be a positive integer no greater than %d seconds", maxQuotaPollIntervalSeconds)
-	}
 	envString("ANTIGRAVITY_QUOTA_HISTORY_PATH", &cfg.QuotaHistoryPath)
-	if strings.TrimSpace(cfg.QuotaHistoryPath) == "" {
-		return Config{}, "", fmt.Errorf("quotaHistoryPath must not be empty")
-	}
 	for _, setting := range []struct {
 		envName  string
 		jsonName string
@@ -192,20 +181,89 @@ func Load() (Config, string, error) {
 		if value, ok := os.LookupEnv(setting.envName); ok {
 			number, err := strconv.Atoi(value)
 			if err != nil {
-				return Config{}, "", fmt.Errorf("%s must be a positive integer", setting.envName)
+				return fmt.Errorf("%s must be a positive integer", setting.envName)
 			}
 			*setting.value = number
 		}
-		if *setting.value <= 0 {
-			return Config{}, "", fmt.Errorf("%s must be a positive integer", setting.jsonName)
-		}
 	}
 	envString("ANTIGRAVITY_CLIENT_VERSION", &cfg.ClientVersion)
-	cfg.ClientVersion = strings.TrimSpace(cfg.ClientVersion)
-	if cfg.ClientVersion == "" {
-		return Config{}, "", fmt.Errorf("clientVersion must not be empty")
+	return nil
+}
+
+func (cfg *Config) normalize() {
+	if cfg.Port == 0 {
+		cfg.Port = DefaultPort
 	}
-	return cfg, path, nil
+	cfg.Host = strings.TrimSpace(cfg.Host)
+	if cfg.Host == "" {
+		cfg.Host = DefaultHost
+	}
+	cfg.APIKey = strings.TrimSpace(cfg.APIKey)
+	cfg.OAuthClientID = strings.TrimSpace(cfg.OAuthClientID)
+	cfg.OAuthClientSecret = strings.TrimSpace(cfg.OAuthClientSecret)
+	if cfg.DailyEndpoint == "" {
+		cfg.DailyEndpoint = DefaultDailyEndpoint
+	}
+	if cfg.ProdEndpoint == "" {
+		cfg.ProdEndpoint = DefaultProdEndpoint
+	}
+	cfg.DailyEndpoint = strings.TrimRight(cfg.DailyEndpoint, "/")
+	cfg.ProdEndpoint = strings.TrimRight(cfg.ProdEndpoint, "/")
+	cfg.ClientVersion = strings.TrimSpace(cfg.ClientVersion)
+}
+
+// Validate checks effective settings without reading the environment, applying
+// defaults, or validating OAuth pairs that explicit access-token use may bypass.
+func (cfg Config) Validate() error {
+	if cfg.Port < 1 || cfg.Port > 65535 {
+		return fmt.Errorf("port must be an integer from 1 to 65535")
+	}
+	if err := validateListenAddress(cfg.Host, cfg.APIKey); err != nil {
+		return err
+	}
+	if err := validateCloudEndpoint("ANTIGRAVITY_DAILY_ENDPOINT", cfg.DailyEndpoint); err != nil {
+		return err
+	}
+	if err := validateCloudEndpoint("ANTIGRAVITY_PROD_ENDPOINT", cfg.ProdEndpoint); err != nil {
+		return err
+	}
+	if err := ValidatePollInterval(cfg.QuotaPollIntervalSeconds); err != nil {
+		return err
+	}
+	if strings.TrimSpace(cfg.QuotaHistoryPath) == "" {
+		return fmt.Errorf("quotaHistoryPath must not be empty")
+	}
+	if cfg.QuotaHistoryMaxSamples <= 0 {
+		return fmt.Errorf("quotaHistoryMaxSamples must be a positive integer")
+	}
+	if cfg.MaxConcurrentGenerations <= 0 {
+		return fmt.Errorf("maxConcurrentGenerations must be a positive integer")
+	}
+	if cfg.ClientVersion == "" {
+		return fmt.Errorf("clientVersion must not be empty")
+	}
+	return nil
+}
+
+// ValidatePollInterval rejects seconds that would overflow a time.Duration.
+func ValidatePollInterval(seconds int) error {
+	const maxSeconds = int64((1<<63 - 1) / time.Second)
+	if seconds <= 0 || int64(seconds) > maxSeconds {
+		return fmt.Errorf("quotaPollIntervalSeconds must be a positive integer no greater than %d seconds", maxSeconds)
+	}
+	return nil
+}
+
+// WithProxyDefaults fills the optional settings accepted by direct constructors.
+// Load instead validates explicit zero/negative resource settings as errors.
+func (cfg Config) WithProxyDefaults() Config {
+	if cfg.ClientVersion == "" {
+		cfg.ClientVersion = DefaultClientVersion
+	}
+	if cfg.MaxConcurrentGenerations <= 0 {
+		cfg.MaxConcurrentGenerations = DefaultMaxConcurrentGenerations
+	}
+	return cfg
 }
 
 // OAuthCredentials resolves a whole environment pair before the saved pair.
@@ -213,14 +271,28 @@ func Load() (Config, string, error) {
 func (cfg Config) OAuthCredentials() (string, string, error) {
 	id, secret, provided := oauthEnvironmentPair()
 	if provided {
-		if id == "" || secret == "" {
-			return "", "", fmt.Errorf("ANTIGRAVITY_OAUTH_CLIENT_ID and ANTIGRAVITY_OAUTH_CLIENT_SECRET must be provided together")
-		}
-		return id, secret, nil
+		return validateEnvironmentOAuthPair(id, secret)
 	}
 	id, secret = strings.TrimSpace(cfg.OAuthClientID), strings.TrimSpace(cfg.OAuthClientSecret)
 	if (id == "") != (secret == "") {
 		return "", "", fmt.Errorf("oauthClientId and oauthClientSecret must be provided together; run antigravity-proxy login or configure a complete environment pair")
+	}
+	return id, secret, nil
+}
+
+// OAuthEnvironmentCredentials resolves a complete environment client pair.
+// An absent pair returns empty strings; a partial pair never falls back to disk.
+func OAuthEnvironmentCredentials() (string, string, error) {
+	id, secret, provided := oauthEnvironmentPair()
+	if !provided {
+		return "", "", nil
+	}
+	return validateEnvironmentOAuthPair(id, secret)
+}
+
+func validateEnvironmentOAuthPair(id, secret string) (string, string, error) {
+	if id == "" || secret == "" {
+		return "", "", fmt.Errorf("ANTIGRAVITY_OAUTH_CLIENT_ID and ANTIGRAVITY_OAUTH_CLIENT_SECRET must be provided together")
 	}
 	return id, secret, nil
 }
@@ -285,7 +357,7 @@ func readConfig(path string, cfg *Config) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("config %s must be a regular file", path)
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0 {
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		return nil, fmt.Errorf("config %s must have owner-only permissions (chmod 600)", path)
 	}
 	data, err := io.ReadAll(file)
@@ -315,7 +387,6 @@ func readConfig(path string, cfg *Config) ([]byte, error) {
 // silently overwrite aliases, and a later map serialization can change the winner.
 func rejectDuplicateConfigFields(data []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
 	if _, err := decoder.Token(); err != nil {
 		return err
 	}
@@ -332,22 +403,10 @@ func rejectDuplicateConfigFields(data []byte) error {
 			}
 		}
 		keys = append(keys, key)
-		// Consume one value without retaining it, including any nested containers.
-		depth := 0
-		for {
-			token, err := decoder.Token()
-			if err != nil {
-				return err
-			}
-			switch token {
-			case json.Delim('{'), json.Delim('['):
-				depth++
-			case json.Delim('}'), json.Delim(']'):
-				depth--
-			}
-			if depth == 0 {
-				break
-			}
+		// Let encoding/json consume the complete value, including nested containers.
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return err
 		}
 	}
 	_, err := decoder.Token()
@@ -369,29 +428,28 @@ func UpdateCredentials(path string, creds Credentials) error {
 			return fmt.Errorf("read saved credentials: %w", err)
 		}
 	}
-	// encoding/json matches Config keys case-insensitively. Remove every alias
-	// before inserting canonical keys so an old static token cannot survive login.
-	for key := range fields {
-		if strings.EqualFold(key, "accessToken") || strings.EqualFold(key, "refreshToken") ||
-			strings.EqualFold(key, "oauthClientId") || strings.EqualFold(key, "oauthClientSecret") ||
-			strings.EqualFold(key, "accountId") || strings.EqualFold(key, "accountEmail") ||
-			strings.EqualFold(key, "accountName") {
-			delete(fields, key)
-		}
-	}
-	for key, value := range map[string]string{
-		"accessToken":       creds.AccessToken,
-		"refreshToken":      creds.RefreshToken,
-		"oauthClientId":     creds.OAuthClientID,
-		"oauthClientSecret": creds.OAuthClientSecret,
-		"accountId":         creds.AccountID,
-		"accountEmail":      creds.AccountEmail,
-		"accountName":       creds.AccountName,
+	for _, field := range []struct {
+		key   string
+		value string
+	}{
+		{key: "accessToken", value: creds.AccessToken},
+		{key: "refreshToken", value: creds.RefreshToken},
+		{key: "oauthClientId", value: creds.OAuthClientID},
+		{key: "oauthClientSecret", value: creds.OAuthClientSecret},
+		{key: "accountId", value: creds.AccountID},
+		{key: "accountEmail", value: creds.AccountEmail},
+		{key: "accountName", value: creds.AccountName},
 	} {
-		if value == "" {
-			continue
+		// encoding/json matches Config keys case-insensitively. Remove every
+		// alias, even for empty replacements, so obsolete credentials cannot survive.
+		for key := range fields {
+			if strings.EqualFold(key, field.key) {
+				delete(fields, key)
+			}
 		}
-		fields[key], _ = json.Marshal(value)
+		if field.value != "" {
+			fields[field.key], _ = json.Marshal(field.value)
+		}
 	}
 	data, err = json.MarshalIndent(fields, "", "  ")
 	if err != nil {
@@ -438,7 +496,7 @@ func localConfigFilesystem() configFilesystem {
 		createTemp: func(dir, pattern string) (configTemporaryFile, error) {
 			return os.CreateTemp(dir, pattern)
 		},
-		rename: os.Rename,
+		rename: atomicfile.Replace,
 		remove: os.Remove,
 	}
 	// Go cannot open directories for Sync on Windows.
@@ -456,7 +514,7 @@ func saveConfigBytes(path string, data []byte) error {
 
 func saveConfigBytesWithFS(path string, data []byte, fs configFilesystem) error {
 	dir := filepath.Dir(path)
-	if err := fs.mkdirAll(dir, 0700); err != nil {
+	if err := fs.mkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create config directory: %w", err)
 	}
 	// Open before rename: failure must leave the previous configuration intact.
@@ -476,7 +534,12 @@ func saveConfigBytesWithFS(path string, data []byte, fs configFilesystem) error 
 	tmp := file.Name()
 	defer fs.remove(tmp)
 	defer file.Close()
-	if _, err := file.Write(append(data, '\n')); err != nil {
+	record := append(data, '\n')
+	n, err := file.Write(record)
+	if err == nil && n != len(record) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
 	if err := file.Sync(); err != nil {

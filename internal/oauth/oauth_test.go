@@ -16,26 +16,14 @@ import (
 	"testing"
 	"time"
 
+	"antigravity-proxy/internal/testutil"
+
 	"antigravity-proxy/internal/config"
 )
 
 func clearOAuthEnvironment(t *testing.T) {
 	t.Helper()
-	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_ID", "")
-	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET", "")
-	for _, key := range []string{"ANTIGRAVITY_ACCESS_TOKEN", "ANTIGRAVITY_REFRESH_TOKEN"} {
-		value, existed := os.LookupEnv(key)
-		if err := os.Unsetenv(key); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() {
-			if existed {
-				_ = os.Setenv(key, value)
-			} else {
-				_ = os.Unsetenv(key)
-			}
-		})
-	}
+	testutil.UnsetEnv(t, "ANTIGRAVITY_ACCESS_TOKEN", "ANTIGRAVITY_REFRESH_TOKEN", "ANTIGRAVITY_OAUTH_CLIENT_ID", "ANTIGRAVITY_OAUTH_CLIENT_SECRET", "OAUTH_CALLBACK_PORT")
 }
 
 func syntheticPair(t *testing.T) (string, string) {
@@ -100,21 +88,10 @@ func TestLoginPersistsPairOnlyWithSuccessfulTokens(t *testing.T) {
 			t.Fatal("login selected the wrong saved token")
 		}
 		info, err := os.Stat(path)
-		if err != nil || info.Mode().Perm() != 0600 {
+		if err != nil || info.Mode().Perm() != 0o600 {
 			t.Fatal("saved OAuth pair is not owner-only")
 		}
 	}
-}
-
-type oauthTestTransport struct {
-	base   http.RoundTripper
-	target *url.URL
-}
-
-func (transport oauthTestTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	clone := request.Clone(request.Context())
-	clone.URL.Scheme, clone.URL.Host = transport.target.Scheme, transport.target.Host
-	return transport.base.RoundTrip(clone)
 }
 
 func TestRefreshUsesSavedPairAndWholeEnvironmentOverride(t *testing.T) {
@@ -137,19 +114,13 @@ func TestRefreshUsesSavedPairAndWholeEnvironmentOverride(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(Tokens{AccessToken: t.Name() + "-access", ExpiresIn: 3600})
 	}))
 	defer server.Close()
-	target, err := url.Parse(server.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	original := http.DefaultTransport
-	http.DefaultTransport = oauthTestTransport{base: original, target: target}
-	t.Cleanup(func() { http.DefaultTransport = original })
+	client := testutil.RedirectClient(t, server.URL)
 	for _, override := range []bool{false, true} {
 		if override {
 			t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_ID", id+"-override")
 			t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET", secret+"-override")
 		}
-		tokens, err := Refresh(context.Background(), cfg)
+		tokens, err := RefreshWithClient(context.Background(), cfg, client)
 		if err != nil || tokens.AccessToken == "" || tokens.ExpiresIn != 3600 {
 			t.Fatal("refresh did not decode successful token response")
 		}
@@ -176,14 +147,8 @@ func TestExchangeOAuthCodeSendsMatchingPairAndPKCE(t *testing.T) {
 		_, _ = io.WriteString(w, `{"access_token":"synthetic-access","refresh_token":"synthetic-refresh"}`)
 	}))
 	defer server.Close()
-	target, err := url.Parse(server.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	original := http.DefaultTransport
-	http.DefaultTransport = oauthTestTransport{base: original, target: target}
-	t.Cleanup(func() { http.DefaultTransport = original })
-	tokens, err := exchangeOAuthCode(context.Background(), t.Name()+"-code", t.Name()+"-verifier", "http://127.0.0.1:51121/oauth-callback", id, secret)
+	client := testutil.RedirectClient(t, server.URL)
+	tokens, err := exchangeOAuthCodeWithClient(context.Background(), client, t.Name()+"-code", t.Name()+"-verifier", "http://127.0.0.1:51121/oauth-callback", id, secret)
 	if err != nil || tokens.RefreshToken == "" {
 		t.Fatal("authorization code exchange did not return refresh token")
 	}
@@ -271,16 +236,10 @@ func TestLoginCallbackPersistsPairForLaterRefresh(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(Tokens{AccessToken: t.Name() + "-access", RefreshToken: t.Name() + "-refresh", ExpiresIn: 3600})
 			}))
 			defer tokenServer.Close()
-			target, err := url.Parse(tokenServer.URL)
-			if err != nil {
-				t.Fatal(err)
-			}
-			original := http.DefaultTransport
-			http.DefaultTransport = oauthTestTransport{base: original, target: target}
-			t.Cleanup(func() { http.DefaultTransport = original })
+			client := testutil.RedirectClient(t, tokenServer.URL)
 			output := loginTestOutput{authorization: make(chan string, 1)}
 			result := make(chan error, 1)
-			go func() { result <- login(cfg, path, output) }()
+			go func() { result <- loginWithClient(cfg, path, output, client) }()
 			var address string
 			select {
 			case address = <-output.authorization:
@@ -304,7 +263,9 @@ func TestLoginCallbackPersistsPairForLaterRefresh(t *testing.T) {
 			if callbackURL.Hostname() != "127.0.0.1" {
 				t.Fatal("callback redirect does not match the IPv4 loopback listener")
 			}
-			callbackClient := &http.Client{Transport: original, Timeout: 5 * time.Second}
+			callbackClient := &http.Client{Timeout: 5 * time.Second}
+			// Drain responses so connection replacement does not race the CLI's
+			// graceful shutdown and exhaust the test's completion deadline.
 			for _, stray := range []struct {
 				method string
 				query  url.Values
@@ -322,6 +283,10 @@ func TestLoginCallbackPersistsPairForLaterRefresh(t *testing.T) {
 				response, err := callbackClient.Do(request)
 				if err != nil {
 					t.Fatal("could not deliver stray callback")
+				}
+				if _, err := io.Copy(io.Discard, response.Body); err != nil {
+					response.Body.Close()
+					t.Fatal("could not read stray callback response", err)
 				}
 				response.Body.Close()
 				if response.StatusCode != stray.status {
@@ -342,9 +307,13 @@ func TestLoginCallbackPersistsPairForLaterRefresh(t *testing.T) {
 			if err != nil {
 				t.Fatal("could not deliver loopback callback")
 			}
+			if _, err := io.Copy(io.Discard, response.Body); err != nil {
+				response.Body.Close()
+				t.Fatal("could not read callback response", err)
+			}
 			response.Body.Close()
 			wantStatus := http.StatusOK
-			if failAuthorization {
+			if failAuthorization || scenario.failToken {
 				wantStatus = http.StatusBadRequest
 			}
 			if response.StatusCode != wantStatus {
@@ -391,7 +360,7 @@ func TestLoginCallbackPersistsPairForLaterRefresh(t *testing.T) {
 			if saved.OAuthClientID != id || saved.OAuthClientSecret != secret || saved.RefreshToken != t.Name()+"-refresh" || saved.ProjectID != cfg.ProjectID {
 				t.Fatal("successful login did not save matching pair and refresh token")
 			}
-			tokens, err := Refresh(context.Background(), saved)
+			tokens, err := RefreshWithClient(context.Background(), saved, client)
 			if err != nil || tokens.AccessToken == "" || calls.Load() != 2 {
 				t.Fatal("later refresh could not use the saved pair")
 			}
@@ -399,44 +368,35 @@ func TestLoginCallbackPersistsPairForLaterRefresh(t *testing.T) {
 	}
 }
 
-func TestResolveLoginCredentialsDefault(t *testing.T) {
-	clearOAuthEnvironment(t)
-	id, secret, err := resolveLoginCredentials(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestResolveLoginCredentials(t *testing.T) {
+	cases := []struct {
+		name       string
+		envID      string
+		envSecret  string
+		wantID     string
+		wantSecret string
+		wantErr    bool
+	}{
+		{name: "default consumer", wantID: consumerClientID, wantSecret: consumerClientSecret},
+		{name: "environment override", envID: "test-custom-id", envSecret: "test-custom-secret", wantID: "test-custom-id", wantSecret: "test-custom-secret"},
+		{name: "partial environment", envID: "only-id", wantErr: true},
 	}
-	if id != consumerAppTag || secret != consumerTokenKey {
-		t.Fatalf("expected official credentials, got id=%q, secret=%q", id, secret)
-	}
-}
-
-func TestResolveLoginCredentialsEnvironmentOverride(t *testing.T) {
-	clearOAuthEnvironment(t)
-	envID, envSecret := "test-custom-id", "test-custom-secret"
-	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_ID", envID)
-	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET", envSecret)
-	id, secret, err := resolveLoginCredentials(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if id != envID || secret != envSecret {
-		t.Fatalf("expected environment credentials, got id=%q, secret=%q", id, secret)
-	}
-}
-
-func TestResolveLoginCredentialsContextCancelled(t *testing.T) {
-	clearOAuthEnvironment(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, _, err := resolveLoginCredentials(ctx); err == nil {
-		t.Fatal("expected error on cancelled context")
-	}
-}
-
-func TestResolveLoginCredentialsPartialEnvironment(t *testing.T) {
-	clearOAuthEnvironment(t)
-	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_ID", "only-id")
-	if _, _, err := resolveLoginCredentials(context.Background()); err == nil {
-		t.Fatal("expected error with partial environment pair")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearOAuthEnvironment(t)
+			if tc.envID != "" {
+				t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_ID", tc.envID)
+			}
+			if tc.envSecret != "" {
+				t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET", tc.envSecret)
+			}
+			id, secret, err := resolveLoginCredentials()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("resolveLoginCredentials() error = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && (id != tc.wantID || secret != tc.wantSecret) {
+				t.Fatalf("got id=%q secret=%q, want id=%q secret=%q", id, secret, tc.wantID, tc.wantSecret)
+			}
+		})
 	}
 }

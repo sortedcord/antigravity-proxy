@@ -12,37 +12,19 @@ import (
 	"testing"
 	"time"
 
+	"antigravity-proxy/internal/testutil"
+
 	"antigravity-proxy/internal/quota"
 )
 
 func awaitState(t *testing.T, c *Collector, check func(quota.Snapshot, bool, PollInfo) bool) {
 	t.Helper()
-	deadline := time.NewTimer(3 * time.Second)
-	defer deadline.Stop()
-	ticks := time.NewTicker(time.Millisecond)
-	defer ticks.Stop()
-	for {
-		sample, exists, info := c.Latest()
-		if check(sample, exists, info) {
-			return
-		}
-		select {
-		case <-deadline.C:
-			t.Fatalf("timed out waiting for collector state: exists=%v snapshot=%+v polling=%+v", exists, sample, info)
-		case <-ticks.C:
-		}
-	}
+	testutil.Eventually(t, func() bool { sample, exists, info := c.Latest(); return check(sample, exists, info) }, "timed out waiting for collector state")
 }
 
 func receiveCall(t *testing.T, calls <-chan chan quota.Snapshot) chan quota.Snapshot {
 	t.Helper()
-	select {
-	case call := <-calls:
-		return call
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for quota fetch")
-		return nil
-	}
+	return testutil.Await(t, calls, "timed out waiting for quota fetch")
 }
 
 func TestPollingImmediatePeriodicTransitionsAndCancellation(t *testing.T) {
@@ -265,7 +247,8 @@ func TestStartAndCloseLifecycleGuards(t *testing.T) {
 		return observation(observationTime(), 1), nil
 	}
 	c := openTestCollector(t, filepath.Join(t.TempDir(), "before-start"), time.Second, fetch)
-	if err := c.Start(nil); err == nil {
+	var nilCtx context.Context
+	if err := c.Start(nilCtx); err == nil {
 		t.Fatal("Start accepted nil context")
 	}
 	if err := c.Close(); err != nil {

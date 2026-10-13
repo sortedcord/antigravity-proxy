@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"antigravity-proxy/internal/httpjson"
 )
 
 // antigravityModelMetadata supplies public-model eligibility; model ID names do
@@ -48,19 +50,30 @@ type geminiModelCursor struct {
 	PageSize int    `json:"pageSize"`
 }
 
-func (p *Proxy) fetchGeminiModels(ctx context.Context, token, projectID string) ([]geminiModel, error) {
-	resp, err := p.postToAntigravity(ctx, token, "/v1internal:fetchAvailableModels", "application/json", map[string]string{"project": projectID})
+// fetchRawModelCatalog is shared by the raw debugging endpoint and the Gemini
+// catalog adapter. Only the adapted catalog is cached: /models deliberately
+// preserves the unfiltered provider response and its HTTP status.
+func (p *Proxy) fetchRawModelCatalog(ctx context.Context, token, project string) ([]byte, int, error) {
+	resp, err := p.postJSON(ctx, token, "/v1internal:fetchAvailableModels", project, map[string]string{"project": project})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
 	const maxCatalogSize = 8 << 20
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCatalogSize+1))
 	if err != nil {
-		return nil, fmt.Errorf("read model catalog from Cloud Code: %w", err)
+		return nil, 0, fmt.Errorf("read model catalog from Cloud Code: %w", err)
 	}
-	if len(body) > maxCatalogSize {
-		return nil, fmt.Errorf("model catalog from Cloud Code exceeds size limit")
+	if len(body) > maxCatalogSize || !json.Valid(body) {
+		return nil, 0, fmt.Errorf("invalid model catalog from Cloud Code")
+	}
+	return body, resp.StatusCode, nil
+}
+
+func (p *Proxy) fetchGeminiModels(ctx context.Context, token, projectID string) ([]geminiModel, error) {
+	body, _, err := p.fetchRawModelCatalog(ctx, token, projectID)
+	if err != nil {
+		return nil, err
 	}
 	var catalog struct {
 		Models      map[string]antigravityModelMetadata `json:"models"`
@@ -186,7 +199,7 @@ func (p *Proxy) handleGeminiModels(w http.ResponseWriter, r *http.Request) {
 		cursor, _ := json.Marshal(geminiModelCursor{Version: 1, After: models[end-1].Name, PageSize: pageSize})
 		response.NextPageToken = base64.RawURLEncoding.EncodeToString(cursor)
 	}
-	writeJSON(w, http.StatusOK, response)
+	httpjson.Write(w, http.StatusOK, response)
 }
 
 func (p *Proxy) handleGeminiModel(w http.ResponseWriter, r *http.Request, model string) {
@@ -200,5 +213,5 @@ func (p *Proxy) handleGeminiModel(w http.ResponseWriter, r *http.Request, model 
 		writeGeminiError(w, http.StatusNotFound, "model not found: "+name)
 		return
 	}
-	writeJSON(w, http.StatusOK, models[index])
+	httpjson.Write(w, http.StatusOK, models[index])
 }

@@ -3,12 +3,12 @@ package proxy
 
 import (
 	"crypto/subtle"
-	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"antigravity-proxy/internal/httpjson"
 )
 
 // ServeHTTP serves health, model discovery, native Gemini generation, and quota status.
@@ -19,57 +19,58 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
-	switch {
-	case r.URL.Path == "/health" && r.Method == http.MethodGet:
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "credential_configured": p.hasCredentials()})
-	case r.URL.Path == "/models" && r.Method == http.MethodGet:
-		if !p.authorized(w, r) {
-			return
-		}
-		if !p.hasCredentials() {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Google authentication unavailable"})
-			return
-		}
-		p.handleModels(w, r)
-	case r.URL.Path == "/status/limit" || r.URL.Path == "/status/usage":
-		if !p.authorized(w, r) {
-			return
-		}
-		p.StatusHandler.ServeHTTP(w, r)
-	case r.URL.Path == "/status/account":
-		if !p.authorized(w, r) {
-			return
-		}
-		w.Header().Set("Cache-Control", "no-store")
-		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", http.MethodGet)
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "status endpoints require GET"})
-			return
-		}
-		p.handleStatusAccount(w, r)
-	case r.URL.Path == "/config/login":
+	route := resolveRoute(r.URL.Path)
+	if route.kind == routeHealth && r.Method == http.MethodGet {
+		httpjson.Write(w, http.StatusOK, map[string]any{"status": "ok", "credential_configured": p.hasCredentials()})
+		return
+	}
+	if route.kind == routeUnknown || route.kind == routeHealth || (route.kind == routeRawModels && r.Method != http.MethodGet) {
+		http.NotFound(w, r)
+		return
+	}
+	if route.kind == routeLogin {
 		w.Header().Set("Cache-Control", "no-store")
 		if p.cfg.APIKey == "" {
 			rejectUnreadBody(w, r)
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "API_KEY must be configured on the server to use /config/login"})
+			httpjson.Write(w, http.StatusServiceUnavailable, map[string]string{"error": "API_KEY must be configured on the server to use /config/login"})
 			return
 		}
-		if !p.authorized(w, r) {
+	}
+	if !p.authorized(w, r) {
+		return
+	}
+	switch route.kind {
+	case routeRawModels:
+		if !p.hasCredentials() {
+			httpjson.Write(w, http.StatusServiceUnavailable, map[string]string{"error": "Google authentication unavailable"})
 			return
 		}
+		p.handleModels(w, r)
+	case routeLimit, routeUsage:
+		if p.StatusHandler == nil {
+			rejectUnreadBody(w, r)
+			w.Header().Set("Cache-Control", "no-store")
+			httpjson.Write(w, http.StatusServiceUnavailable, map[string]string{"error": "quota status is not configured"})
+			return
+		}
+		p.StatusHandler.ServeHTTP(w, r)
+	case routeAccount:
+		w.Header().Set("Cache-Control", "no-store")
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			httpjson.Write(w, http.StatusMethodNotAllowed, map[string]string{"error": "status endpoints require GET"})
+			return
+		}
+		p.handleStatusAccount(w, r)
+	case routeLogin:
 		if p.LoginHandler == nil {
 			rejectUnreadBody(w, r)
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "runtime login is not configured"})
+			httpjson.Write(w, http.StatusServiceUnavailable, map[string]string{"error": "runtime login is not configured"})
 			return
 		}
 		p.LoginHandler.ServeHTTP(w, r)
-	case r.URL.Path == "/v1beta/models" || strings.HasPrefix(r.URL.Path, "/v1beta/models/"):
-		if !p.authorized(w, r) {
-			return
-		}
-		p.handleGeminiRoute(w, r)
-	default:
-		http.NotFound(w, r)
+	case routeNativeList, routeNativeModel:
+		p.handleGeminiRoute(w, r, route)
 	}
 }
 
@@ -96,7 +97,7 @@ func (p *Proxy) authorized(w http.ResponseWriter, r *http.Request) bool {
 		if strings.HasPrefix(r.URL.Path, "/v1beta/") {
 			writeGeminiError(w, http.StatusUnauthorized, "invalid API key")
 		} else {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid API key"})
+			httpjson.Write(w, http.StatusUnauthorized, map[string]string{"error": "invalid API key"})
 		}
 		return false
 	}
@@ -114,7 +115,7 @@ func rejectUnreadBody(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 	token, err := p.accessToken(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Google authentication unavailable"})
+		httpjson.Write(w, http.StatusServiceUnavailable, map[string]string{"error": "Google authentication unavailable"})
 		return
 	}
 	projectID, err := p.getProjectID(r.Context(), token)
@@ -122,52 +123,31 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeGeminiUpstreamError(w, err)
 		return
 	}
-	resp, err := p.postToAntigravity(r.Context(), token, "/v1internal:fetchAvailableModels", "application/json", map[string]any{"project": projectID})
+	body, code, err := p.fetchRawModelCatalog(r.Context(), token, projectID)
 	if err != nil {
 		writeGeminiUpstreamError(w, err)
 		return
 	}
-	defer resp.Body.Close()
-	const maxModelListSize = 8 << 20
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxModelListSize+1))
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "read model list from Cloud Code"})
-		return
-	}
-	if len(body) > maxModelListSize || !json.Valid(body) {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "invalid model list from Cloud Code"})
-		return
-	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
+	w.WriteHeader(code)
 	_, _ = w.Write(body)
 }
 
 func (p *Proxy) handleStatusAccount(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Cache-Control", "no-store")
 	if !p.hasCredentials() {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Google authentication unavailable"})
+		httpjson.Write(w, http.StatusServiceUnavailable, map[string]string{"error": "Google authentication unavailable"})
 		return
 	}
 	details, err := p.AccountDetails(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Google authentication unavailable"})
+		httpjson.Write(w, http.StatusServiceUnavailable, map[string]string{"error": "Google authentication unavailable"})
 		return
 	}
-	writeJSON(w, http.StatusOK, details)
+	httpjson.Write(w, http.StatusOK, details)
 }
 
-func writeJSON(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	encoder := json.NewEncoder(w)
-	// Keep URL query separators intact when links are copied from JSON responses.
-	encoder.SetEscapeHTML(false)
-	_ = encoder.Encode(value)
-}
-
-func (p *Proxy) handleGeminiRoute(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/v1beta/models" {
+func (p *Proxy) handleGeminiRoute(w http.ResponseWriter, r *http.Request, route apiRoute) {
+	if route.kind == routeNativeList {
 		if r.Method != http.MethodGet {
 			writeGeminiError(w, http.StatusMethodNotAllowed, "model listing requires GET")
 			return
@@ -175,8 +155,7 @@ func (p *Proxy) handleGeminiRoute(w http.ResponseWriter, r *http.Request) {
 		p.handleGeminiModels(w, r)
 		return
 	}
-	resource := strings.TrimPrefix(r.URL.Path, "/v1beta/models/")
-	model, action, hasAction := strings.Cut(resource, ":")
+	model, action, hasAction := route.model, route.action, route.hasAction
 	if model == "" || strings.ContainsAny(model, "/:") || strings.Contains(action, ":") {
 		writeGeminiError(w, http.StatusNotFound, "model endpoint not found")
 		return
@@ -225,7 +204,7 @@ func writeGeminiError(w http.ResponseWriter, code int, message string) {
 	case http.StatusGatewayTimeout:
 		status = "DEADLINE_EXCEEDED"
 	}
-	writeJSON(w, code, map[string]any{"error": map[string]any{"code": code, "message": message, "status": status}})
+	httpjson.Write(w, code, map[string]any{"error": map[string]any{"code": code, "message": message, "status": status}})
 }
 
 // writeGeminiUpstreamError exposes HTTP status and validated retry metadata,

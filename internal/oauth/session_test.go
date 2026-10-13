@@ -14,16 +14,14 @@ import (
 	"testing"
 	"time"
 
+	"antigravity-proxy/internal/testutil"
+
 	"antigravity-proxy/internal/config"
 )
 
 func testUserInfo() UserInfo {
 	return UserInfo{ID: "1001", Email: "user@example.com", Name: "Test User", VerifiedEmail: true}
 }
-
-type sessionTransportFunc func(*http.Request) (*http.Response, error)
-
-func (f sessionTransportFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func sessionResponse(body string) *http.Response {
 	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
@@ -33,11 +31,7 @@ func sessionClient(t *testing.T, handler http.Handler) *http.Client {
 	t.Helper()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	target, err := url.Parse(server.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &http.Client{Transport: oauthTestTransport{base: http.DefaultTransport, target: target}, Timeout: 5 * time.Second}
+	return testutil.RedirectClient(t, server.URL)
 }
 
 func successfulSessionClient(t *testing.T, user UserInfo) *http.Client {
@@ -231,7 +225,7 @@ func TestSessionExpiryAndAuthorizationErrorReleaseListener(t *testing.T) {
 				deadline := time.Now().Add(5 * time.Second)
 				for {
 					mgr.mu.Lock()
-					expired := mgr.active.status == SessionStatusExpired
+					expired := mgr.active.status == sessionExpired
 					mgr.mu.Unlock()
 					if expired {
 						break
@@ -243,7 +237,7 @@ func TestSessionExpiryAndAuthorizationErrorReleaseListener(t *testing.T) {
 				}
 			case "expired completion":
 				mgr.mu.Lock()
-				mgr.active.ExpiresAt = time.Now().Add(-time.Second)
+				mgr.active.expiresAt = time.Now().Add(-time.Second)
 				mgr.mu.Unlock()
 				if _, err := mgr.Complete(context.Background(), "code", state); !errors.Is(err, ErrSessionExpired) {
 					t.Fatal(err)
@@ -276,7 +270,7 @@ func TestConcurrentCompletionExchangesAtMostOnce(t *testing.T) {
 	clearOAuthEnvironment(t)
 	entered, release := make(chan struct{}), make(chan struct{})
 	var exchanges, activations atomic.Int32
-	client := &http.Client{Transport: sessionTransportFunc(func(r *http.Request) (*http.Response, error) {
+	client := &http.Client{Transport: testutil.RoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path == "/token" {
 			exchanges.Add(1)
 			close(entered)
@@ -317,7 +311,7 @@ func TestCloseCancelsInflightAndPreventsLaterActivation(t *testing.T) {
 	clearOAuthEnvironment(t)
 	entered := make(chan struct{})
 	var activations atomic.Int32
-	client := &http.Client{Transport: sessionTransportFunc(func(r *http.Request) (*http.Response, error) {
+	client := &http.Client{Transport: testutil.RoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		close(entered)
 		<-r.Context().Done()
 		return nil, r.Context().Err()

@@ -63,23 +63,8 @@ func (c *Collector) History(query Query) (Result, error) {
 	if query.Order == "" {
 		query.Order = "desc"
 	}
-	if query.Pool != "all" && query.Pool != quota.GeminiPool && query.Pool != quota.ThirdPartyPool {
-		return Result{}, fmt.Errorf("invalid quota pool %q", query.Pool)
-	}
-	if query.Window != "all" && query.Window != quota.FiveHourWindow && query.Window != quota.WeeklyWindow {
-		return Result{}, fmt.Errorf("invalid quota window %q", query.Window)
-	}
-	if query.Limit < 1 || query.Limit > 1000 {
-		return Result{}, errors.New("quota history limit must be between 1 and 1000")
-	}
-	if query.Offset < 0 {
-		return Result{}, errors.New("quota history offset must be nonnegative")
-	}
-	if query.Order != "asc" && query.Order != "desc" {
-		return Result{}, errors.New("quota history order must be asc or desc")
-	}
-	if query.From != nil && query.To != nil && query.From.After(*query.To) {
-		return Result{}, errors.New("quota history from must not be after to")
+	if err := query.Validate(); err != nil {
+		return Result{}, err
 	}
 	result := Result{
 		Entries: make([]Entry, 0), Limit: query.Limit, Offset: query.Offset,
@@ -129,16 +114,9 @@ func (c *Collector) History(query Query) (Result, error) {
 		}
 		sample := &c.samples[c.ordered[position]]
 		slot := slots[flat%selected]
-		pool := &sample.Pools.Gemini
-		if slot >= 2 {
-			pool = &sample.Pools.ThirdParty
-		}
-		window := pool.FiveHour
-		if slot%2 == 1 {
-			window = pool.Weekly
-		}
+		bucket := sample.Buckets()[slot]
 		result.Entries = append(result.Entries, Entry{
-			ObservedAt: sample.ObservedAt, Pool: pool.ID, PoolDisplayName: pool.DisplayName, Window: cloneWindow(window),
+			ObservedAt: sample.ObservedAt, Pool: bucket.Pool.ID, PoolDisplayName: bucket.Pool.DisplayName, Window: bucket.Window.Clone(),
 		})
 	}
 	if count < result.Total-query.Offset {
@@ -146,4 +124,28 @@ func (c *Collector) History(query Query) (Result, error) {
 		result.NextOffset = &next
 	}
 	return result, nil
+}
+
+// Validate checks filters without applying defaults. This keeps explicit HTTP
+// limit=0 invalid while allowing zero-value programmatic queries to default.
+func (query Query) Validate() error {
+	if query.Pool != "all" && query.Pool != quota.GeminiPool && query.Pool != quota.ThirdPartyPool {
+		return fmt.Errorf("invalid quota pool %q", query.Pool)
+	}
+	if query.Window != "all" && query.Window != quota.FiveHourWindow && query.Window != quota.WeeklyWindow {
+		return fmt.Errorf("invalid quota window %q", query.Window)
+	}
+	if query.Limit < 1 || query.Limit > 1000 {
+		return errors.New("quota history limit must be between 1 and 1000")
+	}
+	if query.Offset < 0 {
+		return errors.New("quota history offset must be nonnegative")
+	}
+	if query.Order != "asc" && query.Order != "desc" {
+		return errors.New("quota history order must be asc or desc")
+	}
+	if query.From != nil && query.To != nil && query.From.After(*query.To) {
+		return errors.New("quota history from must not be after to")
+	}
+	return nil
 }

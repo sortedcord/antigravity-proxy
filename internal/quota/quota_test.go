@@ -65,7 +65,7 @@ func TestParseWindowAvailabilityAndInvalidData(t *testing.T) {
 	cases := []struct {
 		name   string
 		fields string
-		status string
+		status WindowStatus
 		reason string
 	}{
 		{"missing values", ``, "unavailable", "quota_not_reported"},

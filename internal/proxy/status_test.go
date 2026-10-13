@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -44,6 +45,32 @@ func TestStatusEndpointsRequireLocalKeyAndGet(t *testing.T) {
 	}
 }
 
+func TestUnwiredStatusEndpointsRemainAuthenticated(t *testing.T) {
+	p := New(config.Config{APIKey: "local-key"})
+	for _, path := range []string{"/status/limit", "/status/usage"} {
+		for _, authenticated := range []bool{false, true} {
+			t.Run(path+"/authenticated="+fmt.Sprint(authenticated), func(t *testing.T) {
+				request := httptest.NewRequest(http.MethodGet, path, nil)
+				if authenticated {
+					request.Header.Set("x-goog-api-key", "local-key")
+				}
+				response := httptest.NewRecorder()
+				p.ServeHTTP(response, request)
+				want := http.StatusUnauthorized
+				if authenticated {
+					want = http.StatusServiceUnavailable
+					if response.Header().Get("Cache-Control") != "no-store" {
+						t.Fatal("unavailable status response can be cached")
+					}
+				}
+				if response.Code != want || !json.Valid(response.Body.Bytes()) {
+					t.Fatalf("response = %d %s; want %d and JSON", response.Code, response.Body.String(), want)
+				}
+			})
+		}
+	}
+}
+
 func TestQuotaStatusCompositionSharesAccountAndNativeTransport(t *testing.T) {
 	var quotaCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -64,7 +91,7 @@ func TestQuotaStatusCompositionSharesAccountAndNativeTransport(t *testing.T) {
 	defer upstream.Close()
 	cfg := config.Config{APIKey: "local-key", RefreshToken: "unused-refresh-token", ProjectID: "shared-project", DailyEndpoint: upstream.URL, ProdEndpoint: upstream.URL, QuotaHistoryPath: filepath.Join(t.TempDir(), "usage.jsonl")}
 	p := New(cfg)
-	p.cachedToken, p.tokenExpiresAt = "shared-cached-token", time.Now().Add(time.Hour)
+	p.tokens.cachedToken, p.tokens.expiresAt = "shared-cached-token", time.Now().Add(time.Hour)
 	service := quotastatus.NewService(cfg, p.QuotaFetcher().Fetch)
 	p.StatusHandler = service
 	if err := service.Start(context.Background()); err != nil {

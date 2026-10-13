@@ -9,10 +9,14 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 )
 
-const maxGenerationRequestSize = 50 << 20
+const (
+	maxGenerationRequestSize = 50 << 20
+	// Large image and signature payloads are supported, but upstream responses
+	// must not consume unbounded memory before they can be validated.
+	maxGenerationResponseSize = 128 << 20
+)
 
 type generationEnvelope struct {
 	Project     string          `json:"project"`
@@ -33,7 +37,13 @@ func (payload generationEnvelope) requestBody() (func() io.Reader, int64, error)
 		UserAgent   string `json:"userAgent"`
 		RequestType string `json:"requestType"`
 		RequestID   string `json:"requestId"`
-	}{payload.Project, payload.Model, payload.UserAgent, payload.RequestType, payload.RequestID})
+	}{
+		Project:     payload.Project,
+		Model:       payload.Model,
+		UserAgent:   payload.UserAgent,
+		RequestType: payload.RequestType,
+		RequestID:   payload.RequestID,
+	})
 	if err != nil {
 		return nil, 0, err
 	}
@@ -49,10 +59,7 @@ func (p *Proxy) handleGenerateContent(w http.ResponseWriter, r *http.Request, mo
 		return
 	}
 	if !p.hasCredentials() {
-		if r.ProtoMajor == 1 {
-			w.Header().Set("Connection", "close")
-			_ = http.NewResponseController(w).SetReadDeadline(time.Now())
-		}
+		rejectUnreadBody(w, r)
 		writeGeminiError(w, http.StatusServiceUnavailable, "Google authentication unavailable")
 		return
 	}
@@ -60,13 +67,7 @@ func (p *Proxy) handleGenerateContent(w http.ResponseWriter, r *http.Request, mo
 	case p.generationSlots <- struct{}{}:
 		defer func() { <-p.generationSlots }()
 	default:
-		if r.ProtoMajor == 1 {
-			// HTTP/1 normally drains small unread request bodies before responding.
-			// Close this connection instead, and prevent its final Body.Close from
-			// waiting for bytes a saturated caller may never send.
-			w.Header().Set("Connection", "close")
-			_ = http.NewResponseController(w).SetReadDeadline(time.Now())
-		}
+		rejectUnreadBody(w, r)
 		w.Header().Set("Retry-After", "1")
 		writeGeminiError(w, http.StatusTooManyRequests, "generation capacity exhausted")
 		return
@@ -109,7 +110,14 @@ func (p *Proxy) handleGenerateContent(w http.ResponseWriter, r *http.Request, mo
 		path, accept = "/v1internal:streamGenerateContent?alt=sse", "text/event-stream"
 	}
 	// Carry caller cancellation into the upstream transport, including body reads.
-	resp, err := p.postToAntigravity(r.Context(), token, path, accept, payload)
+	bodyFactory, length, err := payload.requestBody()
+	if err != nil {
+		writeGeminiError(w, http.StatusInternalServerError, "encode generation request")
+		return
+	}
+	resp, err := p.post(r.Context(), token, upstreamCall{
+		path: path, accept: accept, project: project, body: bodyFactory, length: length,
+	})
 	if err != nil {
 		writeGeminiUpstreamError(w, err)
 		return
@@ -119,7 +127,7 @@ func (p *Proxy) handleGenerateContent(w http.ResponseWriter, r *http.Request, mo
 		forwardGenerationStream(w, resp.Body)
 		return
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := readGenerationResponse(resp.Body, maxGenerationResponseSize)
 	if err != nil {
 		writeGeminiError(w, http.StatusBadGateway, "read generation response from Google upstream")
 		return
@@ -132,6 +140,17 @@ func (p *Proxy) handleGenerateContent(w http.ResponseWriter, r *http.Request, mo
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
+}
+
+func readGenerationResponse(body io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, errors.New("generation response exceeds size limit")
+	}
+	return data, nil
 }
 
 // adaptGenerationBody retains a single raw request buffer. Only generationConfig
@@ -256,12 +275,13 @@ type generationSSEEvent struct {
 	hasData bool
 }
 
-// readGenerationSSEEvent handles arbitrarily long lines and events; Scanner's
-// token limit would truncate Gemini inlineData and signature-bearing responses.
+// readGenerationSSEEvent supports large lines up to the response size bound;
+// Scanner's default token limit would truncate inlineData and signatures.
 func readGenerationSSEEvent(reader *bufio.Reader) (generationSSEEvent, error) {
 	var event generationSSEEvent
+	remaining := int64(maxGenerationResponseSize)
 	for {
-		line, err := reader.ReadString('\n')
+		line, err := readGenerationSSELine(reader, &remaining)
 		if err != nil && err != io.EOF {
 			return generationSSEEvent{}, err
 		}
@@ -286,6 +306,21 @@ func readGenerationSSEEvent(reader *bufio.Reader) (generationSSEEvent, error) {
 		}
 		if err == io.EOF {
 			return event, io.EOF
+		}
+	}
+}
+
+func readGenerationSSELine(reader *bufio.Reader, remaining *int64) (string, error) {
+	var line []byte
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if int64(len(fragment)) > *remaining {
+			return "", errors.New("generation stream event exceeds size limit")
+		}
+		*remaining -= int64(len(fragment))
+		line = append(line, fragment...)
+		if err != bufio.ErrBufferFull {
+			return string(line), err
 		}
 	}
 }
@@ -431,6 +466,10 @@ func forwardGenerationStream(w http.ResponseWriter, body io.Reader) {
 		if len(event.lines) != 0 {
 			frame := encodeGenerationSSEEvent(event, data)
 			if !committed {
+				if pending.Len() > maxGenerationResponseSize-len(frame) {
+					fail(errors.New("generation stream prelude exceeds size limit"))
+					return
+				}
 				pending.Write(frame)
 			} else {
 				if pending.Len() != 0 {

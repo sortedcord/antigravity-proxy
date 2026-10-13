@@ -14,14 +14,14 @@ type modelCatalogKey struct {
 	epoch   uint64
 }
 
-type modelCatalogFlight struct {
-	key      modelCatalogKey
-	done     chan struct{}
-	cancel   context.CancelFunc
-	waiters  int
+type modelCatalogResult struct {
 	models   []geminiModel
-	err      error
 	endpoint string
+}
+
+type modelCatalogFlight struct {
+	*sharedFlight[modelCatalogResult]
+	key modelCatalogKey
 }
 
 type modelCatalogCache struct {
@@ -82,31 +82,19 @@ func (p *Proxy) cachedGeminiModels(ctx context.Context, token, project string) (
 		// A different account/project must not cancel existing callers.
 		fetchCtx, cancel := context.WithCancel(context.Background())
 		fetchCtx = context.WithValue(fetchCtx, accessStateKey{}, &accessRequestState{})
-		flight = &modelCatalogFlight{key: key, done: make(chan struct{}), cancel: cancel}
+		flight = &modelCatalogFlight{key: key, sharedFlight: newSharedFlight[modelCatalogResult](cancel)}
 		p.catalog.flight = flight
 		go p.fetchModelCatalogFlight(fetchCtx, token, project, flight)
 	}
-	flight.waiters++
+	flight.join()
 	p.catalogMu.Unlock()
-	select {
-	case <-ctx.Done():
-		p.catalogMu.Lock()
-		flight.waiters--
-		if flight.waiters == 0 {
-			if p.catalog.flight == flight {
-				p.catalog.flight = nil
-			}
-			flight.cancel()
+	result, err := flight.wait(ctx, &p.catalogMu, func() {
+		if p.catalog.flight == flight {
+			p.catalog.flight = nil
 		}
-		p.catalogMu.Unlock()
-		return nil, ctx.Err()
-	case <-flight.done:
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		recordRequestEndpoint(ctx, flight.endpoint)
-		return cloneGeminiModels(flight.models), flight.err
-	}
+	})
+	recordRequestEndpoint(ctx, result.endpoint)
+	return cloneGeminiModels(result.models), err
 }
 
 func (p *Proxy) fetchModelCatalogFlight(ctx context.Context, token, project string, flight *modelCatalogFlight) {
@@ -114,13 +102,13 @@ func (p *Proxy) fetchModelCatalogFlight(ctx context.Context, token, project stri
 	models, err := p.fetchGeminiModels(ctx, token, project)
 	p.catalogMu.Lock()
 	defer p.catalogMu.Unlock()
-	flight.models, flight.err, flight.endpoint = models, err, requestEndpoint(ctx)
+	endpoint := requestEndpoint(ctx)
 	if p.catalog.flight == flight {
 		p.catalog.flight = nil
 		if err == nil && ctx.Err() == nil && p.catalogEpoch == flight.key.epoch {
-			p.catalog.key, p.catalog.models, p.catalog.endpoint = flight.key, models, flight.endpoint
+			p.catalog.key, p.catalog.models, p.catalog.endpoint = flight.key, models, endpoint
 			p.catalog.expires = p.catalog.now().Add(modelCatalogTTL)
 		}
 	}
-	close(flight.done)
+	flight.finish(modelCatalogResult{models: models, endpoint: endpoint}, err)
 }

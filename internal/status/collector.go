@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	"antigravity-proxy/internal/config"
+	"antigravity-proxy/internal/lifecycle"
 	"antigravity-proxy/internal/quota"
 )
 
@@ -71,8 +71,7 @@ type Collector struct {
 	closed     bool
 	cancel     context.CancelFunc
 	workerDone chan struct{}
-	closeDone  chan struct{}
-	closeErr   error
+	closer     lifecycle.Closer
 }
 
 // Open creates owner-only history storage and holds an exclusive companion lock
@@ -103,7 +102,7 @@ func Open(path string, interval time.Duration, maxSamples int, fetch FetchFunc) 
 	if err != nil {
 		return nil, fmt.Errorf("resolve quota history path: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create quota history directory: %w", err)
 	}
 	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
@@ -120,7 +119,7 @@ func Open(path string, interval time.Duration, maxSamples int, fetch FetchFunc) 
 	}
 	c := &Collector{
 		path: path, tempPrefix: historyTempPrefix(path), lock: lock, maxSamples: maxSamples, storage: defaultHistoryStorage(),
-		interval: interval, fetch: fetch, closeDone: make(chan struct{}), trigger: make(chan struct{}, 1),
+		interval: interval, fetch: fetch, trigger: make(chan struct{}, 1),
 		polling: PollInfo{IntervalSeconds: int64(interval / time.Second)},
 	}
 	fail := func(err error) (*Collector, error) {
@@ -136,7 +135,7 @@ func Open(path string, interval time.Duration, maxSamples int, fetch FetchFunc) 
 	if err := c.cleanHistoryTemps(); err != nil {
 		return fail(err)
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fail(fmt.Errorf("open quota history: %w", err))
 	}
@@ -144,19 +143,13 @@ func Open(path string, interval time.Duration, maxSamples int, fetch FetchFunc) 
 	if info, err := file.Stat(); err != nil || !info.Mode().IsRegular() {
 		return fail(errors.New("quota history must be a regular file"))
 	}
-	if err := file.Chmod(0600); err != nil {
+	if err := file.Chmod(0o600); err != nil {
 		return fail(fmt.Errorf("protect quota history: %w", err))
 	}
 	if err := c.loadHistory(file); err != nil {
 		return fail(err)
 	}
-	c.ordered = make([]int, len(c.samples))
-	for i := range c.ordered {
-		c.ordered[i] = i
-	}
-	sort.SliceStable(c.ordered, func(i, j int) bool {
-		return c.samples[c.ordered[i]].ObservedAt.Before(c.samples[c.ordered[j]].ObservedAt)
-	})
+	c.rebuildIndexLocked()
 	if len(c.samples) != 0 {
 		at := c.samples[len(c.samples)-1].ObservedAt
 		c.polling.LastSuccessAt = &at
@@ -201,6 +194,7 @@ func (c *Collector) run(ctx context.Context) {
 		}
 	}
 }
+
 func (c *Collector) poll(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
@@ -216,10 +210,10 @@ func (c *Collector) poll(ctx context.Context) {
 
 	sample, err := c.fetch(ctx)
 	if err == nil {
-		err = validateSnapshot(sample)
+		err = sample.Validate()
 	}
 	if err == nil {
-		sample = cloneSnapshot(sample)
+		sample = sample.Clone()
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -236,30 +230,13 @@ func (c *Collector) poll(ctx context.Context) {
 		c.polling.LastError = err.Error()
 		return
 	}
-	index := len(c.samples)
-	if index == c.maxSamples {
-		// replaceHistory committed the retained appends plus this sample. Rebase
-		// the ordered index while dropping the oldest append, not the oldest time.
+	if len(c.samples) == c.maxSamples {
 		copy(c.samples, c.samples[1:])
-		index--
-		c.samples[index] = sample
-		n := 0
-		for _, old := range c.ordered {
-			if old != 0 {
-				c.ordered[n] = old - 1
-				n++
-			}
-		}
-		c.ordered = c.ordered[:n]
+		c.samples[len(c.samples)-1] = sample
 	} else {
 		c.samples = append(c.samples, sample)
 	}
-	position := sort.Search(len(c.ordered), func(i int) bool {
-		return c.samples[c.ordered[i]].ObservedAt.After(sample.ObservedAt)
-	})
-	c.ordered = append(c.ordered, 0)
-	copy(c.ordered[position+1:], c.ordered[position:])
-	c.ordered[position] = index
+	c.rebuildIndexLocked()
 	at := sample.ObservedAt
 	c.polling.LastSuccessAt = &at
 	c.polling.LastError = ""
@@ -327,7 +304,7 @@ func (c *Collector) Latest() (quota.Snapshot, bool, PollInfo) {
 	if len(c.samples) == 0 {
 		return quota.Snapshot{}, false, info
 	}
-	return cloneSnapshot(c.samples[len(c.samples)-1]), true, info
+	return c.samples[len(c.samples)-1].Clone(), true, info
 }
 
 // TriggerPoll requests an immediate poll if the collector is started and not closed.
@@ -346,111 +323,39 @@ func (c *Collector) TriggerPoll() {
 // Close cancels and joins the polling worker before closing storage. It is
 // idempotent, safe concurrently, and valid even when Start was never called.
 func (c *Collector) Close() error {
-	c.mu.Lock()
-	if c.closed {
-		done := c.closeDone
+	return c.closer.Close(func() error {
+		c.mu.Lock()
+		c.closed = true
+		cancel, workerDone := c.cancel, c.workerDone
 		c.mu.Unlock()
-		<-done
-		c.mu.RLock()
-		err := c.closeErr
-		c.mu.RUnlock()
-		return err
-	}
-	c.closed = true
-	cancel, workerDone := c.cancel, c.workerDone
-	c.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	if workerDone != nil {
-		<-workerDone
-	}
-	c.mu.Lock()
-	if c.file != nil {
-		c.closeErr = c.file.Close()
-	}
-	c.closeErr = errors.Join(c.closeErr, c.lock.Close())
-	close(c.closeDone)
-	err := c.closeErr
-	c.mu.Unlock()
-	return err
-}
-
-func validateSnapshot(sample quota.Snapshot) error {
-	if sample.ObservedAt.IsZero() || sample.Source == "" {
-		return errors.New("quota observation requires an observation time and source")
-	}
-	for _, item := range []struct {
-		pool       quota.Pool
-		id, prefix string
-	}{
-		{sample.Pools.Gemini, quota.GeminiPool, "gemini"},
-		{sample.Pools.ThirdParty, quota.ThirdPartyPool, "3p"},
-	} {
-		if item.pool.ID != item.id {
-			return fmt.Errorf("invalid quota pool %q", item.pool.ID)
+		if cancel != nil {
+			cancel()
 		}
-		for _, spec := range []struct {
-			window       quota.Window
-			name, bucket string
-		}{
-			{item.pool.FiveHour, quota.FiveHourWindow, item.prefix + "-5h"},
-			{item.pool.Weekly, quota.WeeklyWindow, item.prefix + "-weekly"},
-		} {
-			w := spec.window
-			if w.Window != spec.name || w.BucketID != spec.bucket {
-				return fmt.Errorf("invalid quota window identity %q/%q", w.BucketID, w.Window)
-			}
-			if w.Status != "available" && w.Status != "disabled" && w.Status != "unavailable" {
-				return fmt.Errorf("invalid quota window status %q", w.Status)
-			}
-			if w.Disabled != (w.Status == "disabled") {
-				return errors.New("quota disabled flag disagrees with status")
-			}
-			for _, value := range []struct {
-				pointer *float64
-				max     float64
-			}{
-				{w.RemainingFraction, 1}, {w.RemainingPercent, 100}, {w.UsedPercent, 100},
-			} {
-				if value.pointer != nil && (math.IsNaN(*value.pointer) || math.IsInf(*value.pointer, 0) || *value.pointer < 0 || *value.pointer > value.max) {
-					return errors.New("invalid quota percentage")
-				}
-			}
-			if w.Status != "available" && (w.RemainingFraction != nil || w.RemainingPercent != nil || w.UsedPercent != nil) {
-				return errors.New("unusable quota window contains percentages")
-			}
+		if workerDone != nil {
+			<-workerDone
 		}
-	}
-	return nil
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		var err error
+		if c.file != nil {
+			err = c.file.Close()
+		}
+		return errors.Join(err, c.lock.Close())
+	})
 }
 
-func cloneSnapshot(sample quota.Snapshot) quota.Snapshot {
-	sample.Pools.Gemini.FiveHour = cloneWindow(sample.Pools.Gemini.FiveHour)
-	sample.Pools.Gemini.Weekly = cloneWindow(sample.Pools.Gemini.Weekly)
-	sample.Pools.ThirdParty.FiveHour = cloneWindow(sample.Pools.ThirdParty.FiveHour)
-	sample.Pools.ThirdParty.Weekly = cloneWindow(sample.Pools.ThirdParty.Weekly)
-	return sample
-}
-
-func cloneWindow(window quota.Window) quota.Window {
-	window.RemainingFraction = cloneFloat(window.RemainingFraction)
-	window.RemainingPercent = cloneFloat(window.RemainingPercent)
-	window.UsedPercent = cloneFloat(window.UsedPercent)
-	window.ResetAt = cloneTime(window.ResetAt)
-	if window.RemainingAmount != nil {
-		value := *window.RemainingAmount
-		window.RemainingAmount = &value
+func (c *Collector) rebuildIndexLocked() {
+	if cap(c.ordered) < len(c.samples) {
+		c.ordered = make([]int, len(c.samples))
+	} else {
+		c.ordered = c.ordered[:len(c.samples)]
 	}
-	return window
-}
-
-func cloneFloat(value *float64) *float64 {
-	if value == nil {
-		return nil
+	for i := range c.ordered {
+		c.ordered[i] = i
 	}
-	copy := *value
-	return &copy
+	sort.SliceStable(c.ordered, func(i, j int) bool {
+		return c.samples[c.ordered[i]].ObservedAt.Before(c.samples[c.ordered[j]].ObservedAt)
+	})
 }
 
 func cloneTime(value *time.Time) *time.Time {

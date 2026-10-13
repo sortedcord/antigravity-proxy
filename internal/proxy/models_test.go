@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -9,11 +10,13 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"antigravity-proxy/internal/config"
+	"antigravity-proxy/internal/testutil"
 )
 
 type catalogTestList struct {
@@ -319,5 +322,218 @@ func TestGeminiCatalogEmptyListIsAnArray(t *testing.T) {
 	list := readCatalogTestList(t, p, "")
 	if list.Models == nil || len(list.Models) != 0 || list.NextPageToken != "" {
 		t.Fatalf("empty catalog = %+v", list)
+	}
+}
+
+func waitCatalogWaiters(t *testing.T, p *Proxy, n int) {
+	t.Helper()
+	testutil.Eventually(t, func() bool {
+		p.catalogMu.Lock()
+		defer p.catalogMu.Unlock()
+		return p.catalog.flight != nil && p.catalog.flight.waiters == n
+	}, "catalog callers did not join shared fetch")
+}
+
+func TestModelCatalogSharesFetchAndWaitersCancelIndependently(t *testing.T) {
+	var calls atomic.Int32
+	entered, release := make(chan struct{}, 1), make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		calls.Add(1)
+		entered <- struct{}{}
+		select {
+		case <-release:
+			_, _ = io.WriteString(w, `{"models":{"model":{"apiProvider":"API_PROVIDER_GOOGLE_GEMINI","maxTokens":9007199254740993}}}`)
+		case <-r.Context().Done():
+		}
+	}))
+	defer upstream.Close()
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	p := generationTestProxy(upstream.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done1, done2 := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done1)
+		p.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1beta/models", nil).WithContext(ctx))
+	}()
+	awaitSurface(t, entered)
+	second := httptest.NewRecorder()
+	go func() {
+		defer close(done2)
+		p.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/v1beta/models/model", nil))
+	}()
+	waitCatalogWaiters(t, p, 2)
+	cancel()
+	awaitSurface(t, done1)
+	close(release)
+	awaitSurface(t, done2)
+	if second.Code != 200 || calls.Load() != 1 || !strings.Contains(second.Body.String(), "9007199254740993") {
+		t.Fatalf("shared lookup = %d calls=%d body=%s", second.Code, calls.Load(), second.Body.String())
+	}
+	cached := catalogTestRequest(p, "/v1beta/models")
+	if cached.Code != 200 || calls.Load() != 1 {
+		t.Fatalf("cache miss: %d calls=%d", cached.Code, calls.Load())
+	}
+}
+
+func TestModelCatalogCancelsLastWaiterAndDoesNotCacheFailure(t *testing.T) {
+	entered, canceled := make(chan struct{}, 2), make(chan struct{}, 2)
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		if calls.Add(1) == 1 {
+			entered <- struct{}{}
+			<-r.Context().Done()
+			canceled <- struct{}{}
+			return
+		}
+		_, _ = io.WriteString(w, `{"models":{}}`)
+	}))
+	defer upstream.Close()
+	p := generationTestProxy(upstream.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1beta/models", nil).WithContext(ctx))
+	}()
+	awaitSurface(t, entered)
+	cancel()
+	awaitSurface(t, done)
+	awaitSurface(t, canceled)
+	if w := catalogTestRequest(p, "/v1beta/models"); w.Code != 200 || calls.Load() != 2 {
+		t.Fatalf("canceled fetch was cached: %d calls=%d", w.Code, calls.Load())
+	}
+}
+
+func TestModelCatalogAccountProjectAndIsolation(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = io.WriteString(w, `{"models":{"model":{"apiProvider":"API_PROVIDER_GOOGLE_GEMINI","maxTokens":8123}}}`)
+	}))
+	defer upstream.Close()
+	p := generationTestProxy(upstream.URL)
+	models, err := p.cachedGeminiModels(context.Background(), "token-a", "project-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	models[0].Name = "mutated"
+	models[0].InputTokenLimit[0] = '9'
+	next, err := p.cachedGeminiModels(context.Background(), "token-a", "project-a")
+	if err != nil || next[0].Name != "models/model" || string(next[0].InputTokenLimit) != "8123" || calls.Load() != 1 {
+		t.Fatalf("mutable cache: %v %v calls=%d", next, err, calls.Load())
+	}
+	_, _ = p.cachedGeminiModels(context.Background(), "token-b", "project-a")
+	_, _ = p.cachedGeminiModels(context.Background(), "token-b", "project-b")
+	if calls.Load() != 3 {
+		t.Fatalf("account/project cache separation calls=%d", calls.Load())
+	}
+}
+
+func TestModelCatalogTTLExpiresThroughHTTP(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			_, _ = io.WriteString(w, `{"models":{"model":{"apiProvider":"API_PROVIDER_GOOGLE_GEMINI","displayName":"First"}}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"models":{"model":{"apiProvider":"API_PROVIDER_GOOGLE_GEMINI","displayName":"Updated"}}}`)
+	}))
+	defer upstream.Close()
+	p := generationTestProxy(upstream.URL)
+	advance := catalogTestClock(p)
+	first := readCatalogTestList(t, p, "")
+	if got := catalogTestString(t, first.Models[0], "displayName"); got != "First" {
+		t.Fatalf("first catalog = %q", got)
+	}
+	advance(modelCatalogTTL - time.Nanosecond)
+	beforeExpiry := readCatalogTestList(t, p, "")
+	if got := catalogTestString(t, beforeExpiry.Models[0], "displayName"); got != "First" || calls.Load() != 1 {
+		t.Fatalf("catalog expired early: name=%q calls=%d", got, calls.Load())
+	}
+	advance(time.Nanosecond)
+	afterExpiry := readCatalogTestList(t, p, "")
+	if got := catalogTestString(t, afterExpiry.Models[0], "displayName"); got != "Updated" || calls.Load() != 2 {
+		t.Fatalf("expired catalog was not refreshed: name=%q calls=%d", got, calls.Load())
+	}
+	readCatalogTestList(t, p, "")
+	if calls.Load() != 2 {
+		t.Fatalf("refreshed catalog was not cached: calls=%d", calls.Load())
+	}
+}
+
+func TestModelCatalogHTTPFailureIsNotCached(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":{"message":"temporarily unavailable"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"models":{"model":{"apiProvider":"API_PROVIDER_GOOGLE_GEMINI"}}}`)
+	}))
+	defer upstream.Close()
+	p := generationTestProxy(upstream.URL)
+	if response := catalogTestRequest(p, "/v1beta/models"); response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("failed catalog status = %d: %s", response.Code, response.Body.String())
+	}
+	for range 2 {
+		list := readCatalogTestList(t, p, "")
+		if len(list.Models) != 1 || calls.Load() != 2 {
+			t.Fatalf("HTTP failure cached or recovered catalog uncached: models=%v calls=%d", list.Models, calls.Load())
+		}
+	}
+}
+
+func TestModelCatalogProjectRejectionInvalidatesThroughHTTP(t *testing.T) {
+	var discoveries, catalogs atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1internal:loadCodeAssist":
+			discoveries.Add(1)
+			// Rediscover the same ID: a different cache key must not be required
+			// for project invalidation to refresh the catalog.
+			_, _ = io.WriteString(w, `{"cloudaicompanionProject":"catalog-project"}`)
+		case "/v1internal:fetchAvailableModels":
+			if catalogs.Add(1) == 1 {
+				_, _ = io.WriteString(w, `{"models":{"model":{"apiProvider":"API_PROVIDER_GOOGLE_GEMINI","displayName":"First"}}}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"models":{"model":{"apiProvider":"API_PROVIDER_GOOGLE_GEMINI","displayName":"After rejection"}}}`)
+		case "/v1internal:generateContent":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"error":{"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"PROJECT_INVALID","domain":"googleapis.com","metadata":{"project":"catalog-project"}}]}}`)
+		default:
+			t.Errorf("unexpected upstream path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+	p := New(config.Config{AccessToken: "token", DailyEndpoint: upstream.URL, ProdEndpoint: upstream.URL})
+	first := readCatalogTestList(t, p, "")
+	if got := catalogTestString(t, first.Models[0], "displayName"); got != "First" {
+		t.Fatalf("first catalog = %q", got)
+	}
+	readCatalogTestList(t, p, "")
+	if discoveries.Load() != 1 || catalogs.Load() != 1 {
+		t.Fatalf("initial project/catalog not reused: discoveries=%d catalogs=%d", discoveries.Load(), catalogs.Load())
+	}
+	rejected := httptest.NewRecorder()
+	p.ServeHTTP(rejected, httptest.NewRequest(http.MethodPost, "/v1beta/models/model:generateContent", strings.NewReader(`{}`)))
+	if rejected.Code != http.StatusForbidden {
+		t.Fatalf("project rejection = %d: %s", rejected.Code, rejected.Body.String())
+	}
+	refreshed := readCatalogTestList(t, p, "")
+	if got := catalogTestString(t, refreshed.Models[0], "displayName"); got != "After rejection" || discoveries.Load() != 2 || catalogs.Load() != 2 {
+		t.Fatalf("project rejection did not refresh catalog: name=%q discoveries=%d catalogs=%d", got, discoveries.Load(), catalogs.Load())
 	}
 }

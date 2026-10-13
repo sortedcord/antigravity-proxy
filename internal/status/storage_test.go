@@ -130,7 +130,7 @@ func TestHistoryTornTailRecoveryWarnsAndSurvivesAppendAndReopen(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "history.jsonl")
 			prefix := encodeHistory(t, test.prefix)
 			data := append(append([]byte(nil), prefix...), test.tail...)
-			if err := os.WriteFile(path, data, 0600); err != nil {
+			if err := os.WriteFile(path, data, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			logs.Reset()
@@ -173,7 +173,7 @@ func TestCompleteMalformedHistoryOutsideRetentionIsFatalAndReleasesLock(t *testi
 	path := filepath.Join(t.TempDir(), "history")
 	sample := observation(observationTime(), 1)
 	data := append([]byte("{broken}\n"), encodeHistory(t, []quota.Snapshot{sample, sample, sample})...)
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	fetch := func(context.Context) (quota.Snapshot, error) { return sample, nil }
@@ -184,7 +184,7 @@ func TestCompleteMalformedHistoryOutsideRetentionIsFatalAndReleasesLock(t *testi
 	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, data) {
 		t.Fatalf("malformed history was modified: %v", err)
 	}
-	if err := os.WriteFile(path, encodeHistory(t, []quota.Snapshot{sample}), 0600); err != nil {
+	if err := os.WriteFile(path, encodeHistory(t, []quota.Snapshot{sample}), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	c := openRetainedCollector(t, path, 1, fetch)
@@ -204,7 +204,7 @@ func TestHistoryRetentionStartupLiveAndReopenPreserveTimeOrdering(t *testing.T) 
 	for _, maxSamples := range []int{1, 3} {
 		t.Run(fmt.Sprint(maxSamples), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "history")
-			if err := os.WriteFile(path, encodeHistory(t, all[:5]), 0600); err != nil {
+			if err := os.WriteFile(path, encodeHistory(t, all[:5]), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			index := 5
@@ -231,7 +231,7 @@ func TestTornTailRecoveryAlsoCompactsOversizedHistory(t *testing.T) {
 		samples = append(samples, observation(observationTime().Add(time.Duration(index)*time.Minute), float64(index)/10))
 	}
 	data := append(encodeHistory(t, samples), []byte("{partial")...)
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	fetch := func(context.Context) (quota.Snapshot, error) { return samples[4], nil }
@@ -254,6 +254,9 @@ func TestHistoryRetentionDefaultsAndServiceConfiguration(t *testing.T) {
 		{"configured", 2, 2},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			if test.retained > 100 && testing.Short() {
+				t.Skip("skipping large retention test in short mode")
+			}
 			path := filepath.Join(t.TempDir(), "history")
 			// Seed in one write, not thousands of fsync-backed polls. Startup must
 			// retain the newest appends, and one real poll crosses the live limit.
@@ -261,7 +264,7 @@ func TestHistoryRetentionDefaultsAndServiceConfiguration(t *testing.T) {
 			for index := range samples {
 				samples[index] = observation(observationTime().Add(time.Duration(index)*time.Minute), 0.5)
 			}
-			if err := os.WriteFile(path, encodeHistory(t, samples), 0600); err != nil {
+			if err := os.WriteFile(path, encodeHistory(t, samples), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			observations := make(chan quota.Snapshot, 1)
@@ -341,6 +344,9 @@ func TestHistoryLockProcessHelper(t *testing.T) {
 
 func lockProbe(t *testing.T, path string, wantLocked bool) {
 	t.Helper()
+	if testing.Short() {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestHistoryLockProcessHelper$")
@@ -396,6 +402,9 @@ func TestHistoryLockHeldAcrossLoadCompactionAndClose(t *testing.T) {
 }
 
 func TestHistoryLockReleasedWhenOwningProcessExits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping process exit test in short mode")
+	}
 	path := filepath.Join(t.TempDir(), "history")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -447,7 +456,7 @@ func TestTornTailRecoveryRequiresTruncateAndSync(t *testing.T) {
 	for _, failure := range []string{"truncate", "sync"} {
 		t.Run(failure, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "history")
-			file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+			file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -619,7 +628,7 @@ func TestStartupCompactionFailureLeavesOriginalHistoryIntact(t *testing.T) {
 		observation(observationTime().Add(time.Minute), 0.2),
 	}
 	original := encodeHistory(t, samples)
-	if err := os.WriteFile(path, original, 0600); err != nil {
+	if err := os.WriteFile(path, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	lock, err := lockHistory(path + ".lock")
@@ -627,7 +636,7 @@ func TestStartupCompactionFailureLeavesOriginalHistoryIntact(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lock.Close()
-	file, err := os.OpenFile(path, os.O_RDWR, 0600)
+	file, err := os.OpenFile(path, os.O_RDWR, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -658,7 +667,7 @@ func TestProductionHistoryHandlesCanTruncateAndReopen(t *testing.T) {
 			if scenario == "startup replacement" {
 				seed = all
 			}
-			if err := os.WriteFile(path, encodeHistory(t, seed), 0600); err != nil {
+			if err := os.WriteFile(path, encodeHistory(t, seed), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			fetch := func(context.Context) (quota.Snapshot, error) { return all[2], nil }
