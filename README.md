@@ -29,12 +29,13 @@ See the [video input guide](docs/api.md#multimodal--video-understanding) for exa
 
 ## Features
 
+- **Multi-Account Support**: Host multiple Google accounts simultaneously within a single proxy instance. Account-specific API keys let gateways like Bifrost track usage, costs, and failover quotas independently per account.
 - **Native Video Input**: Send video clips to compatible Gemini models through Antigravity for summaries, scene understanding, and questions about what happens in a recording.
 - **No Hardcoded Model List**: Discover models directly from Antigravity and use newly available models without waiting for model-specific patches or proxy releases.
 - **Optional Gateway Compatibility**: Use Gemini-compatible clients directly, or add [Bifrost](https://getbifrost.ai/) to connect OpenAI-compatible coding harnesses such as Aider, OpenCode, and Cline.
 - **Live Quota & Limit Tracking**: Built-in `/status/limit` and `/status/usage` endpoints track your 5-hour and weekly bucket limits in real time.
 - **One-Click Browser Login**: Interactive `login` command opens your browser, completes Google OAuth with PKCE, and handles token refresh automatically in the background.
-- **Zero Leaks & Secure Auth**: Protect the proxy with a custom local `API_KEY`. Your Google OAuth tokens remain strictly on the proxy and are never exposed to clients.
+- **Zero Leaks & Secure Auth**: Protect the proxy with a custom local `API_KEY` or `ADMIN_API_KEY`. Your Google OAuth tokens remain strictly on the proxy and are never exposed to clients.
 - **Ultra Lightweight**: Single static Go binary with zero external runtime dependencies. Also available as a hardened scratch Docker image.
 
 ## Quick Start
@@ -69,16 +70,17 @@ API_KEY="my-secret-key" HOST="0.0.0.0" ./antigravity-proxy serve
 
 You can also start the server before configuring a Google account:
 ```sh
-API_KEY="my-secret-key" ./antigravity-proxy serve
-curl http://127.0.0.1:8080/config/login -H "x-goog-api-key: my-secret-key" | jq -r '.login_url'
+ADMIN_API_KEY="my-admin-key" ./antigravity-proxy serve
+curl -X POST http://127.0.0.1:8080/admin/login-sessions \
+  -H "x-api-key: my-admin-key" | jq -r '.login_url'
 ```
 With `jq` installed, this prints a plain authorization URL to open in your browser. Without `jq`, omit the pipe and open the `login_url` value from the JSON response without surrounding quotes. If the browser cannot reach the proxy's loopback callback, submit the final redirect URL:
 ```sh
-curl http://127.0.0.1:8080/config/login \
-  -H "x-goog-api-key: my-secret-key" -H "Content-Type: application/json" \
+curl http://127.0.0.1:8080/admin/login-sessions/<SESSION_ID>/complete \
+  -H "x-api-key: my-admin-key" -H "Content-Type: application/json" \
   -d '{"url":"http://127.0.0.1:51121/oauth-callback?code=...&state=..."}'
 ```
-Runtime login requires a configured `API_KEY`, no token environment overrides, and a writable private config directory. It can replace the active account without restarting; failed preparation leaves the old account usable. `/health` reports credential presence, while `/status/account` provides email/name and the provider-reported tier. See the [runtime API contract](docs/api.md#runtime-account-configuration) and [writable container setup](docs/deployment.md#runtime-login-in-a-container).
+Runtime login requires a configured `ADMIN_API_KEY`, no token environment overrides, and a writable private config directory. See the [Admin API reference](docs/api.md#admin-management-api) and [writable container setup](docs/deployment.md#runtime-login-in-a-container).
 
 ### 4. Test Generation
 ```sh

@@ -28,14 +28,6 @@ func (p *Proxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if route.kind == routeLogin {
-		w.Header().Set("Cache-Control", "no-store")
-		if p.cfg.APIKey == "" {
-			rejectUnreadBody(w, r)
-			httpjson.Write(w, http.StatusServiceUnavailable, map[string]string{"error": "API_KEY must be configured on the server to use /config/login"})
-			return
-		}
-	}
 	if !p.authorized(w, r) {
 		return
 	}
@@ -62,13 +54,6 @@ func (p *Proxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		p.handleStatusAccount(w, r)
-	case routeLogin:
-		if p.LoginHandler == nil {
-			rejectUnreadBody(w, r)
-			httpjson.Write(w, http.StatusServiceUnavailable, map[string]string{"error": "runtime login is not configured"})
-			return
-		}
-		p.LoginHandler.ServeHTTP(w, r)
 	case routeNativeList, routeNativeModel:
 		p.handleGeminiRoute(w, r, route)
 	}

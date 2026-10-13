@@ -35,7 +35,7 @@ docker run -d \
 
 ### Runtime Login in a Container
 
-To configure or replace an account through `/config/login`, use a writable private config directory instead of the `readonly` config mount above. Keep the container root filesystem read-only, but mount configuration and history as writable persistent directories. Both must belong to the container UID (10001 by default, or the explicit `--user` UID), and existing `config.json` must be mode `0600`.
+To configure or add accounts through `/admin/login-sessions`, use a writable private config directory instead of the `readonly` config mount above. Keep the container root filesystem read-only, but mount configuration and history as writable persistent directories. Both must belong to the container UID (10001 by default, or the explicit `--user` UID), and existing `config.json` must be mode `0600`.
 
 ```sh
 mkdir -p "$HOME/.config/antigravity-proxy" "$HOME/.local/share/antigravity-proxy"
@@ -128,16 +128,22 @@ When integrating Antigravity Proxy with [Bifrost](https://getbifrost.ai/):
 
 1. **Topology**:
    Place both containers on the same Docker network (e.g. `ai-stack`).
-2. **Provider Configuration**:
-   Configure Bifrost with its built-in `gemini` provider:
+2. **Multi-Account Provider Configuration**:
+   Configure Bifrost with a single provider and multiple keys mapped to your Antigravity Proxy accounts:
    ```json
    {
      "providers": {
        "antigravity-proxy": {
          "keys": [
            {
-             "name": "antigravity-local",
-             "value": "env.ANTIGRAVITY_PROXY_API_KEY",
+             "name": "ag-personal",
+             "value": "env.AG_KEY_PERSONAL",
+             "models": ["*"],
+             "weight": 1.0
+           },
+           {
+             "name": "ag-work",
+             "value": "env.AG_KEY_WORK",
              "models": ["*"],
              "weight": 1.0
            }
@@ -153,7 +159,11 @@ When integrating Antigravity Proxy with [Bifrost](https://getbifrost.ai/):
      }
    }
    ```
-3. **Important Configuration Details**:
+3. **Key Benefits**:
+   - **Per-Account Metrics in Bifrost**: Bifrost tracks latency, token usage, and costs per key (`selected_key_name`), giving you isolated metrics for each Google account without running multiple proxy containers.
+   - **Automatic Quota Failover**: When an account reaches its 5-hour or weekly Antigravity limit, the proxy returns `429 RESOURCE_EXHAUSTED` with retry metadata, prompting Bifrost to automatically switch to the next key.
+   - **Single Traefik Router**: Only one backend URL and Traefik route is needed regardless of how many accounts you add.
+4. **Important Configuration Details**:
    - The `base_url` must point to `http://antigravity-proxy:8080/v1beta` (including `/v1beta`).
    - Enable `allow_private_network` so Bifrost permits connections to container network IP addresses.
-   - Set `ANTIGRAVITY_PROXY_API_KEY` in Bifrost's environment matching the proxy's `API_KEY`.
+   - Set each account's API key (e.g., created via `antigravity-proxy keys create <account>` or `/admin/accounts/{id}/keys`) in Bifrost's environment.

@@ -11,7 +11,6 @@ const (
 	routeLimit
 	routeUsage
 	routeAccount
-	routeLogin
 	routeNativeList
 	routeNativeModel
 )
@@ -37,7 +36,6 @@ func resolveRoute(path string) apiRoute {
 		{path: "/status/limit", kind: routeLimit},
 		{path: "/status/usage", kind: routeUsage},
 		{path: "/status/account", kind: routeAccount},
-		{path: "/config/login", kind: routeLogin},
 		{path: "/v1beta/models", kind: routeNativeList},
 	} {
 		if path == route.path {

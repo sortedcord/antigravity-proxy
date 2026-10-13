@@ -97,6 +97,10 @@ func (w *accessResponseWriter) Flush() { _ = w.FlushError() }
 func accessRoute(r *http.Request) (string, string) { return resolveRoute(r.URL.Path).accessLabel() }
 
 func (p *Proxy) serveWithAccessLog(w http.ResponseWriter, r *http.Request) {
+	p.serveWithAccessLogScoped(w, r, p.accountID, "")
+}
+
+func (p *Proxy) serveWithAccessLogScoped(w http.ResponseWriter, r *http.Request, accountID, keyID string) {
 	started := time.Now()
 	r, err := ensureRequestID(w, r)
 	if err != nil {
@@ -114,9 +118,22 @@ func (p *Proxy) serveWithAccessLog(w http.ResponseWriter, r *http.Request) {
 				status = http.StatusInternalServerError
 			}
 		}
-		slog.Info("http access", "route", route, "model", model, "status", status,
-			"duration", time.Since(started), "request_id", w.Header().Get("X-Request-ID"),
-			"endpoint", requestEndpoint(r.Context()), "aborted", panicValue != nil || r.Context().Err() != nil)
+		attrs := []any{
+			"route", route,
+			"model", model,
+			"status", status,
+			"duration", time.Since(started),
+			"request_id", w.Header().Get("X-Request-ID"),
+			"endpoint", requestEndpoint(r.Context()),
+			"aborted", panicValue != nil || r.Context().Err() != nil,
+		}
+		if accountID != "" {
+			attrs = append([]any{"account", accountID}, attrs...)
+		}
+		if keyID != "" {
+			attrs = append([]any{"key_id", keyID}, attrs...)
+		}
+		slog.Info("http access", attrs...)
 		if panicValue != nil {
 			panic(panicValue)
 		}

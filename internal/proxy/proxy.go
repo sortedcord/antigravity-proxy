@@ -42,7 +42,6 @@ type Proxy struct {
 
 	// Handlers are wired before publication by the runtime coordinator.
 	StatusHandler http.Handler
-	LoginHandler  http.Handler
 }
 
 // New creates a Gemini upstream proxy with cfg without contacting Google.

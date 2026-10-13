@@ -20,6 +20,7 @@ import (
 
 	"antigravity-proxy/internal/testutil"
 
+	"antigravity-proxy/internal/apikey"
 	"antigravity-proxy/internal/config"
 	"antigravity-proxy/internal/oauth"
 	"antigravity-proxy/internal/quota"
@@ -126,7 +127,21 @@ func runtimeConfig(t *testing.T, provider *runtimeProvider) (config.Config, stri
 		})
 	}
 	home := t.TempDir()
-	cfg := config.Config{Host: "127.0.0.1", APIKey: "runtime-key", AccessToken: "token-a", AccountID: "a", AccountEmail: "a@example.invalid", AccountName: "Account a", DailyEndpoint: provider.server.URL, ProdEndpoint: provider.server.URL, QuotaHistoryPath: filepath.Join(home, "usage.jsonl"), QuotaPollIntervalSeconds: 3600, QuotaHistoryMaxSamples: 20}
+	cfg := config.Config{
+		Host:                     "127.0.0.1",
+		APIKey:                   "runtime-key",
+		AdminAPIKey:              "runtime-key",
+		AdminKeyHash:             apikey.Hash("runtime-key"),
+		AccessToken:              "token-a",
+		AccountID:                "a",
+		AccountEmail:             "a@example.invalid",
+		AccountName:              "Account a",
+		DailyEndpoint:            provider.server.URL,
+		ProdEndpoint:             provider.server.URL,
+		QuotaHistoryPath:         filepath.Join(home, "usage.jsonl"),
+		QuotaPollIntervalSeconds: 3600,
+		QuotaHistoryMaxSamples:   20,
+	}
 	path := filepath.Join(home, "config.json")
 	if err := config.Save(path, cfg); err != nil {
 		t.Fatal(err)
@@ -162,13 +177,14 @@ func runtimeRequest(r http.Handler, method, path string, payload any) *httptest.
 	return response
 }
 
-func loginSubmission(t *testing.T, r *Runtime) map[string]string {
+func loginSubmission(t *testing.T, r *Runtime) (string, map[string]string) {
 	t.Helper()
-	response := runtimeRequest(r, http.MethodGet, "/config/login", nil)
+	response := runtimeRequest(r, http.MethodPost, "/admin/login-sessions", map[string]any{"account": "default", "replace": true})
 	if response.Code != 200 {
 		t.Fatalf("begin: %d %s", response.Code, response.Body.String())
 	}
 	var data struct {
+		ID       string `json:"id"`
 		LoginURL string `json:"login_url"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &data); err != nil {
@@ -178,12 +194,13 @@ func loginSubmission(t *testing.T, r *Runtime) map[string]string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return map[string]string{"code": "code-b", "state": parsed.Query().Get("state")}
+	return data.ID, map[string]string{"code": "code-b", "state": parsed.Query().Get("state")}
 }
 
 func completeRuntimeLogin(t *testing.T, r *Runtime) {
 	t.Helper()
-	response := runtimeRequest(r, http.MethodPost, "/config/login", loginSubmission(t, r))
+	sessionID, submission := loginSubmission(t, r)
+	response := runtimeRequest(r, http.MethodPost, "/admin/login-sessions/"+sessionID+"/complete", submission)
 	if response.Code != 200 {
 		t.Fatalf("complete: %d %s", response.Code, response.Body.String())
 	}
@@ -222,13 +239,13 @@ func TestRuntimeLoginReplacesStartupTokenAndPreservesRefresh(t *testing.T) {
 	cfg, path := runtimeConfig(t, provider)
 	r := startRuntime(t, cfg, path, provider)
 	waitQuota(t, r, .25)
-	submission := loginSubmission(t, r)
-	wrong := runtimeRequest(r, http.MethodPost, "/config/login", map[string]string{"code": "code-b", "state": "wrong"})
+	sessionID, submission := loginSubmission(t, r)
+	wrong := runtimeRequest(r, http.MethodPost, "/admin/login-sessions/"+sessionID+"/complete", map[string]string{"code": "code-b", "state": "wrong"})
 	if wrong.Code != 400 {
 		t.Fatalf("state mismatch accepted: %d", wrong.Code)
 	}
 	requireNativeAccount(t, r, "token-a", "project-a")
-	response := runtimeRequest(r, http.MethodPost, "/config/login", submission)
+	response := runtimeRequest(r, http.MethodPost, "/admin/login-sessions/"+sessionID+"/complete", submission)
 	if response.Code != 200 {
 		t.Fatalf("login: %d %s", response.Code, response.Body.String())
 	}
@@ -242,7 +259,7 @@ func TestRuntimeLoginReplacesStartupTokenAndPreservesRefresh(t *testing.T) {
 	if account.Code != 200 || details.Email != "b@example.invalid" || details.Subscription == nil || details.Subscription.SourceField != "paidTier" || details.Subscription.ID != "g1-pro-tier" {
 		t.Fatalf("wrong account/tier: %d %+v", account.Code, details)
 	}
-	if replay := runtimeRequest(r, http.MethodPost, "/config/login", submission); replay.Code != 409 {
+	if replay := runtimeRequest(r, http.MethodPost, "/admin/login-sessions/"+sessionID+"/complete", submission); replay.Code != 409 {
 		t.Fatalf("consumed state accepted: %d", replay.Code)
 	}
 	leaf := r.active.Load().proxy
@@ -337,7 +354,14 @@ func TestRuntimeHistoryRestartsInPersistedAccountNamespace(t *testing.T) {
 	if err := json.Unmarshal(data, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if saved.AccountID != "b" || saved.AccountEmail != "b@example.invalid" || saved.AccessToken != "" || saved.RefreshToken != "refresh-b" {
+	acc := saved
+	if len(saved.Accounts) > 0 {
+		acc.AccountID = saved.Accounts[0].AccountID
+		acc.AccountEmail = saved.Accounts[0].AccountEmail
+		acc.RefreshToken = saved.Accounts[0].RefreshToken
+		acc.AccessToken = saved.Accounts[0].AccessToken
+	}
+	if acc.AccountID != "b" || acc.AccountEmail != "b@example.invalid" || acc.AccessToken != "" || acc.RefreshToken != "refresh-b" {
 		t.Fatalf("credentials lost identity: %+v", saved)
 	}
 	restarted := startRuntime(t, saved, path, provider)
@@ -382,14 +406,17 @@ func TestRuntimePreparationAndPersistenceFailurePreserveOldAccount(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
+			sessionID, submission := loginSubmission(t, r)
 			if stage == "history" {
 				if err := os.Mkdir(status.AccountHistoryPath(cfg.QuotaHistoryPath, "google:b"), 0o700); err != nil {
 					t.Fatal(err)
 				}
 			} else {
-				r.persist = func(string, config.Credentials) error { return errors.New("private disk error must not leak") }
+				r.persist = func(string, func(*[]config.Account) error) error {
+					return errors.New("private disk error must not leak")
+				}
 			}
-			response := runtimeRequest(r, http.MethodPost, "/config/login", loginSubmission(t, r))
+			response := runtimeRequest(r, http.MethodPost, "/admin/login-sessions/"+sessionID+"/complete", submission)
 			if response.Code != 500 || strings.Contains(response.Body.String(), "private disk error") {
 				t.Fatalf("failure response: %d %s", response.Code, response.Body.String())
 			}
@@ -407,14 +434,14 @@ func TestRuntimeCommittedWarningPublishesMatchingDiskAndLiveAccount(t *testing.T
 	provider := newRuntimeProvider(t)
 	cfg, path := runtimeConfig(t, provider)
 	r := startRuntime(t, cfg, path, provider)
-	r.persist = func(path string, creds config.Credentials) error {
-		if err := config.UpdateCredentials(path, creds); err != nil {
+	r.persist = func(path string, fn func(*[]config.Account) error) error {
+		if err := config.UpdateAccounts(path, fn); err != nil {
 			return err
 		}
 		return &config.CommitError{Err: errors.New("private fsync cause must not leak")}
 	}
-	submission := loginSubmission(t, r)
-	response := runtimeRequest(r, http.MethodPost, "/config/login", submission)
+	sessionID, submission := loginSubmission(t, r)
+	response := runtimeRequest(r, http.MethodPost, "/admin/login-sessions/"+sessionID+"/complete", submission)
 	var body struct {
 		Configured bool `json:"credential_configured"`
 		Uncertain  bool `json:"durability_uncertain"`
@@ -434,10 +461,14 @@ func TestRuntimeCommittedWarningPublishesMatchingDiskAndLiveAccount(t *testing.T
 	if err := json.Unmarshal(data, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if saved.AccountID != r.active.Load().proxy.cfg.AccountID {
+	diskAccountID := saved.AccountID
+	if diskAccountID == "" && len(saved.Accounts) > 0 {
+		diskAccountID = saved.Accounts[0].AccountID
+	}
+	if diskAccountID != r.active.Load().proxy.cfg.AccountID {
 		t.Fatal("disk and live account disagree after committed warning")
 	}
-	if replay := runtimeRequest(r, http.MethodPost, "/config/login", submission); replay.Code != 409 {
+	if replay := runtimeRequest(r, http.MethodPost, "/admin/login-sessions/"+sessionID+"/complete", submission); replay.Code != 409 {
 		t.Fatalf("committed state replayed: %d", replay.Code)
 	}
 }
@@ -447,7 +478,7 @@ func TestRuntimeLoginURLCanBeCopiedFromJSON(t *testing.T) {
 	cfg, path := runtimeConfig(t, provider)
 	cfg.AccessToken, cfg.AccountID, cfg.AccountEmail, cfg.AccountName = "", "", "", ""
 	r := startRuntime(t, cfg, path, provider)
-	response := runtimeRequest(r, http.MethodGet, "/config/login", nil)
+	response := runtimeRequest(r, http.MethodPost, "/admin/login-sessions", nil)
 	if response.Code != http.StatusOK {
 		t.Fatalf("begin: %d %s", response.Code, response.Body.String())
 	}
@@ -477,7 +508,7 @@ func TestRuntimeRequiresManagementKeyAndRejectsWithheldBody(t *testing.T) {
 	cfg.AccessToken, cfg.AccountID, cfg.AccountEmail, cfg.AccountName = "", "", "", ""
 	r := startRuntime(t, cfg, path, provider)
 	unauthorized := httptest.NewRecorder()
-	r.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/config/login", nil))
+	r.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodPost, "/admin/login-sessions", nil))
 	if unauthorized.Code != 401 {
 		t.Fatalf("missing client key accepted: %d", unauthorized.Code)
 	}
@@ -522,9 +553,11 @@ func TestRuntimeRequiresManagementKeyAndRejectsWithheldBody(t *testing.T) {
 		t.Fatalf("wrong early response: %s", buffer[:n])
 	}
 	cfg.APIKey = ""
+	cfg.AdminAPIKey = ""
+	cfg.AdminKeyHash = ""
 	cfg.QuotaHistoryPath = filepath.Join(t.TempDir(), "usage.jsonl")
 	withoutKey := startRuntime(t, cfg, filepath.Join(t.TempDir(), "config.json"), provider)
-	if response := runtimeRequest(withoutKey, http.MethodGet, "/config/login", nil); response.Code != 503 {
+	if response := runtimeRequest(withoutKey, http.MethodPost, "/admin/login-sessions", nil); response.Code != 503 {
 		t.Fatalf("unconfigured management key: %d", response.Code)
 	}
 	if provider.requests.Load() != 0 {
@@ -565,14 +598,14 @@ func TestRuntimeCancellationAfterCredentialCommitStillPublishesMatchingAccount(t
 	r := startRuntime(t, cfg, path, provider)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	r.persist = func(path string, creds config.Credentials) error {
-		if err := config.UpdateCredentials(path, creds); err != nil {
+	r.persist = func(path string, fn func(*[]config.Account) error) error {
+		if err := config.UpdateAccounts(path, fn); err != nil {
 			return err
 		}
 		cancel()
 		return nil
 	}
-	err := r.activate(ctx, oauth.Tokens{AccessToken: "token-b", RefreshToken: "refresh-b", ExpiresIn: 120}, "client", "secret", oauth.UserInfo{ID: "b", Email: "b@example.invalid", Name: "Account b"})
+	_, err := r.activate(ctx, oauth.SessionOptions{AccountID: "default", Replace: true}, oauth.Tokens{AccessToken: "token-b", RefreshToken: "refresh-b", ExpiresIn: 120}, "client", "secret", oauth.UserInfo{ID: "b", Email: "b@example.invalid", Name: "Account b"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -585,7 +618,7 @@ func TestRuntimeCancellationAfterCredentialCommitStillPublishesMatchingAccount(t
 	if err := json.Unmarshal(data, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if saved.AccountID != "b" {
+	if len(saved.Accounts) == 0 || saved.Accounts[0].AccountID != "b" {
 		t.Fatal("cancellation left disk and active account inconsistent")
 	}
 }
@@ -625,7 +658,7 @@ func TestRuntimeRapidAccountReplacementKeepsRequestTokenAndProjectTogether(t *te
 		if i%2 == 1 {
 			account = "a"
 		}
-		if err := r.activate(context.Background(), oauth.Tokens{AccessToken: "token-" + account, ExpiresIn: 120}, "client", "secret", oauth.UserInfo{ID: account, Email: account + "@example.invalid", Name: "Account " + account}); err != nil {
+		if _, err := r.activate(context.Background(), oauth.SessionOptions{AccountID: "default", Replace: true}, oauth.Tokens{AccessToken: "token-" + account, ExpiresIn: 120}, "client", "secret", oauth.UserInfo{ID: account, Email: account + "@example.invalid", Name: "Account " + account}); err != nil {
 			close(stop)
 			<-results
 			t.Fatal(err)
@@ -682,7 +715,7 @@ func TestRuntimeIdentityPromotionDoesNotExtendExpiredCachedToken(t *testing.T) {
 	initial.proxy.tokens.expiresAt = time.Now().Add(-time.Second)
 	initial.proxy.tokens.mu.Unlock()
 	before := provider.refreshCalls.Load()
-	if err := r.promoteIdentity(context.Background(), initial, oauth.UserInfo{ID: "b", Email: "b@example.invalid", Name: "Account b"}); err != nil {
+	if err := r.promoteIdentity(context.Background(), initial.id, oauth.UserInfo{ID: "b", Email: "b@example.invalid", Name: "Account b"}); err != nil {
 		t.Fatal(err)
 	}
 	requireNativeAccount(t, r, "token-b-renewed", "project-b")

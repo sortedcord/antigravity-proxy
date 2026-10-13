@@ -2,6 +2,8 @@ package oauth
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,13 +25,60 @@ const (
 )
 
 var (
-	ErrInvalidState         = errors.New("invalid or expired OAuth state")
-	ErrLoginInProgress      = errors.New("login completion already in progress")
-	ErrSessionAlreadyUsed   = errors.New("OAuth session already used")
-	ErrSessionExpired       = errors.New("OAuth session expired")
-	ErrSessionManagerClosed = errors.New("OAuth session manager closed")
-	ErrTokenEnvironment     = errors.New("remove token environment overrides to use /config/login")
+	ErrInvalidState               = errors.New("invalid or expired OAuth state")
+	ErrLoginInProgress            = errors.New("login completion already in progress")
+	ErrSessionAlreadyUsed         = errors.New("OAuth session already used")
+	ErrSessionExpired             = errors.New("OAuth session expired")
+	ErrSessionManagerClosed       = errors.New("OAuth session manager closed")
+	ErrTokenEnvironment           = errors.New("remove token environment overrides to use login")
+	ErrSessionNotFound            = errors.New("login session not found")
+	ErrAccountIdentityMismatch    = errors.New("account is already linked to a different Google account; pass replace: true to overwrite")
+	ErrGoogleAccountAlreadyLinked = errors.New("Google account is already linked to another proxy account")
 )
+
+// SessionOptions controls account selection and optional key issuance for an OAuth session.
+type SessionOptions struct {
+	AccountID string `json:"account_id,omitempty"`
+	Replace   bool   `json:"replace,omitempty"`
+	IssueKey  string `json:"issue_key,omitempty"`
+}
+
+// SessionInfo describes a created login session.
+type SessionInfo struct {
+	ID        string    `json:"id"`
+	AuthURL   string    `json:"login_url"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// AccountConfigResult describes the result of committing an account during login.
+type AccountConfigResult struct {
+	AccountID string
+	KeyID     string
+	KeySecret string
+}
+
+// OnAccountConfiguredWithOptionsFunc is the extended hook called when authorization succeeds.
+type OnAccountConfiguredWithOptionsFunc func(ctx context.Context, opts SessionOptions, tokens Tokens, clientID, clientSecret string, user UserInfo) (AccountConfigResult, error)
+
+// SessionStatus reports the state of a login session.
+type SessionStatus struct {
+	ID        string     `json:"id"`
+	Status    string     `json:"status"`
+	AuthURL   string     `json:"login_url,omitempty"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	AccountID string     `json:"account_id,omitempty"`
+	Email     string     `json:"email,omitempty"`
+	Name      string     `json:"name,omitempty"`
+	Key       *IssuedKey `json:"key,omitempty"`
+	Error     string     `json:"error,omitempty"`
+}
+
+// IssuedKey contains a newly generated API key secret for one-time retrieval.
+type IssuedKey struct {
+	ID     string `json:"id"`
+	Label  string `json:"label,omitempty"`
+	Secret string `json:"secret"`
+}
 
 // UserInfo contains Google account details returned by userinfo.
 type UserInfo struct {
@@ -103,6 +152,8 @@ const (
 
 // loginSession represents one OAuth attempt. Terminal attempts cannot be replayed.
 type loginSession struct {
+	id           string
+	opts         SessionOptions
 	state        string
 	verifier     string
 	redirectURI  string
@@ -111,12 +162,14 @@ type loginSession struct {
 	authURL      string
 	expiresAt    time.Time
 
-	status      sessionStatus
-	done        chan struct{}
-	result      error
-	listener    net.Listener
-	server      *http.Server
-	expiryTimer *time.Timer
+	status       sessionStatus
+	done         chan struct{}
+	result       error
+	resultUser   UserInfo
+	resultConfig AccountConfigResult
+	listener     net.Listener
+	server       *http.Server
+	expiryTimer  *time.Timer
 }
 
 // OnAccountConfiguredFunc prepares, persists, and activates an authenticated account.
@@ -127,7 +180,8 @@ type OnAccountConfiguredFunc func(ctx context.Context, tokens Tokens, clientID, 
 type SessionManager struct {
 	mu           sync.Mutex
 	active       *loginSession
-	onConfigured OnAccountConfiguredFunc
+	sessions     map[string]*loginSession
+	onConfigured OnAccountConfiguredWithOptionsFunc
 	client       *http.Client
 	ctx          context.Context
 	cancel       context.CancelFunc
@@ -145,11 +199,29 @@ func NewSessionManager(onConfigured OnAccountConfiguredFunc) *SessionManager {
 
 // NewSessionManagerWithClient uses client for both token exchange and userinfo.
 func NewSessionManagerWithClient(client *http.Client, onConfigured OnAccountConfiguredFunc) *SessionManager {
+	var adapted OnAccountConfiguredWithOptionsFunc
+	if onConfigured != nil {
+		adapted = func(ctx context.Context, opts SessionOptions, tokens Tokens, clientID, clientSecret string, user UserInfo) (AccountConfigResult, error) {
+			err := onConfigured(ctx, tokens, clientID, clientSecret, user)
+			return AccountConfigResult{}, err
+		}
+	}
+	return NewSessionManagerWithOptions(client, adapted)
+}
+
+// NewSessionManagerWithOptions configures the session manager with the extended activation hook.
+func NewSessionManagerWithOptions(client *http.Client, onConfigured OnAccountConfiguredWithOptionsFunc) *SessionManager {
 	if client == nil {
 		client = &http.Client{Timeout: DefaultHTTPTimeout}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &SessionManager{client: client, onConfigured: onConfigured, ctx: ctx, cancel: cancel}
+	return &SessionManager{
+		client:       client,
+		onConfigured: onConfigured,
+		ctx:          ctx,
+		cancel:       cancel,
+		sessions:     make(map[string]*loginSession),
+	}
 }
 
 func tokenOverrideError() error {
@@ -159,51 +231,74 @@ func tokenOverrideError() error {
 	return nil
 }
 
-// Begin initiates or reuses a pending OAuth authorization session.
-func (m *SessionManager) Begin(ctx context.Context) (string, time.Time, error) {
+// BeginWithOptions initiates or reuses a pending OAuth authorization session with options.
+func (m *SessionManager) BeginWithOptions(ctx context.Context, opts SessionOptions) (SessionInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
-		return "", time.Time{}, ErrSessionManagerClosed
+		return SessionInfo{}, ErrSessionManagerClosed
 	}
 	if err := ctx.Err(); err != nil {
-		return "", time.Time{}, err
+		return SessionInfo{}, err
 	}
 	if !m.cli {
 		if err := tokenOverrideError(); err != nil {
-			return "", time.Time{}, err
+			return SessionInfo{}, err
 		}
 	}
 	now := time.Now()
+	// Prune old expired sessions to prevent unbounded growth
+	for id, s := range m.sessions {
+		if now.After(s.expiresAt.Add(time.Hour)) {
+			delete(m.sessions, id)
+		}
+	}
 	if m.active != nil {
 		if m.active.status == sessionExchanging {
-			return "", time.Time{}, ErrLoginInProgress
+			return SessionInfo{}, ErrLoginInProgress
 		}
 		if m.active.status == sessionPending && now.Before(m.active.expiresAt) {
-			return m.active.authURL, m.active.expiresAt, nil
+			if m.active.opts == opts {
+				return SessionInfo{ID: m.active.id, AuthURL: m.active.authURL, ExpiresAt: m.active.expiresAt}, nil
+			}
+			return SessionInfo{}, ErrLoginInProgress
 		}
 		m.cleanupSessionLocked(m.active)
+		m.active = nil
 	}
 	clientID, clientSecret, err := resolveLoginCredentials()
 	if err != nil {
-		return "", time.Time{}, err
+		return SessionInfo{}, err
 	}
 	listener, callbackPort, err := listenOAuthCallbackPort()
 	if err != nil {
-		return "", time.Time{}, err
+		return SessionInfo{}, err
 	}
 	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/oauth-callback", callbackPort)
 	authReq, err := buildAuthorizationRequest(clientID, redirectURI)
 	if err != nil {
 		_ = listener.Close()
-		return "", time.Time{}, err
+		return SessionInfo{}, err
 	}
+	var sidBuf [8]byte
+	if _, err := rand.Read(sidBuf[:]); err != nil {
+		_ = listener.Close()
+		return SessionInfo{}, err
+	}
+	sessionID := "ls_" + hex.EncodeToString(sidBuf[:])
+
 	sess := &loginSession{
+		id: sessionID, opts: opts,
 		state: authReq.state, verifier: authReq.verifier, redirectURI: redirectURI,
 		clientID: clientID, clientSecret: clientSecret, authURL: authReq.authURL,
 		expiresAt: now.Add(sessionLifetime), status: sessionPending, listener: listener,
 		done: make(chan struct{}),
 	}
+	if m.sessions == nil {
+		m.sessions = make(map[string]*loginSession)
+	}
+	m.sessions[sessionID] = sess
+	m.active = sess
 	mux := http.NewServeMux()
 	mux.HandleFunc("/oauth-callback", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
@@ -229,7 +324,7 @@ func (m *SessionManager) Begin(ctx context.Context) (string, time.Time, error) {
 			http.Error(w, "missing authorization code", http.StatusBadRequest)
 			return
 		}
-		user, err := m.Complete(r.Context(), code, sess.state)
+		user, _, err := m.CompleteWithSessionID(r.Context(), sess.id, code, sess.state)
 		if err != nil {
 			var committed *config.CommitError
 			if errors.As(err, &committed) {
@@ -262,7 +357,13 @@ func (m *SessionManager) Begin(ctx context.Context) (string, time.Time, error) {
 			m.cleanupSessionLocked(sess)
 		}
 	}()
-	return sess.authURL, sess.expiresAt, nil
+	return SessionInfo{ID: sessionID, AuthURL: sess.authURL, ExpiresAt: sess.expiresAt}, nil
+}
+
+// Begin initiates or reuses a pending OAuth authorization session.
+func (m *SessionManager) Begin(ctx context.Context) (string, time.Time, error) {
+	info, err := m.BeginWithOptions(ctx, SessionOptions{})
+	return info.AuthURL, info.ExpiresAt, err
 }
 
 func (m *SessionManager) expireSession(sess *loginSession) {
@@ -286,35 +387,61 @@ func (m *SessionManager) failPending(sess *loginSession) {
 }
 
 // Complete consumes an attempt exactly once, then invokes the activation hook.
-func (m *SessionManager) Complete(ctx context.Context, code, state string) (user UserInfo, err error) {
+func (m *SessionManager) Complete(ctx context.Context, code, state string) (UserInfo, error) {
+	m.mu.Lock()
+	var sid string
+	if m.active != nil {
+		sid = m.active.id
+	}
+	m.mu.Unlock()
+	user, _, err := m.CompleteWithSessionID(ctx, sid, code, state)
+	return user, err
+}
+
+// CompleteWithSessionID consumes an attempt with session ID and state, then invokes the activation hook.
+func (m *SessionManager) CompleteWithSessionID(ctx context.Context, sessionID, code, state string) (user UserInfo, result AccountConfigResult, err error) {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
-		return UserInfo{}, ErrSessionManagerClosed
+		return UserInfo{}, AccountConfigResult{}, ErrSessionManagerClosed
 	}
-	sess := m.active
-	if sess == nil || sess.state != state {
+	var sess *loginSession
+	if sessionID != "" && m.sessions != nil {
+		sess = m.sessions[sessionID]
+	}
+	if sess == nil && state != "" && m.sessions != nil {
+		for _, s := range m.sessions {
+			if s.state == state {
+				sess = s
+				break
+			}
+		}
+	}
+	if sess == nil {
+		sess = m.active
+	}
+	if sess == nil || (sessionID != "" && sess.id != sessionID) || sess.state != state {
 		m.mu.Unlock()
-		return UserInfo{}, ErrInvalidState
+		return UserInfo{}, AccountConfigResult{}, ErrInvalidState
 	}
 	if sess.status == sessionExchanging {
 		m.mu.Unlock()
-		return UserInfo{}, ErrLoginInProgress
+		return UserInfo{}, AccountConfigResult{}, ErrLoginInProgress
 	}
 	if sess.status == sessionExpired {
 		m.mu.Unlock()
-		return UserInfo{}, ErrSessionExpired
+		return UserInfo{}, AccountConfigResult{}, ErrSessionExpired
 	}
 	if sess.status != sessionPending {
 		m.mu.Unlock()
-		return UserInfo{}, ErrSessionAlreadyUsed
+		return UserInfo{}, AccountConfigResult{}, ErrSessionAlreadyUsed
 	}
 	if !time.Now().Before(sess.expiresAt) {
 		sess.status = sessionExpired
 		m.finishSessionLocked(sess, ErrSessionExpired)
 		m.cleanupSessionLocked(sess)
 		m.mu.Unlock()
-		return UserInfo{}, ErrSessionExpired
+		return UserInfo{}, AccountConfigResult{}, ErrSessionExpired
 	}
 	sess.status = sessionExchanging
 	m.stopExpiryTimerLocked(sess)
@@ -328,45 +455,101 @@ func (m *SessionManager) Complete(ctx context.Context, code, state string) (user
 			sess.status = sessionFailed
 		} else {
 			sess.status = sessionCompleted
+			sess.resultUser = user
+			sess.resultConfig = result
 		}
 		m.finishSessionLocked(sess, err)
+		if m.active == sess {
+			m.active = nil
+		}
 		m.cleanupSessionLocked(sess)
 		m.mu.Unlock()
 	}()
 	if !m.cli {
 		if err := tokenOverrideError(); err != nil {
-			return UserInfo{}, err
+			return UserInfo{}, AccountConfigResult{}, err
 		}
 	}
 	if strings.TrimSpace(code) == "" {
-		return UserInfo{}, errors.New("missing authorization code")
+		return UserInfo{}, AccountConfigResult{}, errors.New("missing authorization code")
 	}
 	exchangeCtx, cancel := context.WithTimeout(ctx, DefaultHTTPTimeout)
 	stop := context.AfterFunc(m.ctx, cancel)
 	defer func() { stop(); cancel() }()
 	tokens, err := exchangeOAuthCodeWithClient(exchangeCtx, m.client, code, sess.verifier, sess.redirectURI, sess.clientID, sess.clientSecret)
 	if err != nil {
-		return UserInfo{}, err
+		return UserInfo{}, AccountConfigResult{}, err
 	}
 	user, err = fetchUserInfo(exchangeCtx, m.client, tokens.AccessToken)
 	if err != nil {
-		return UserInfo{}, err
+		return UserInfo{}, AccountConfigResult{}, err
 	}
 	m.mu.Lock()
 	closed := m.closed
 	m.mu.Unlock()
 	if closed {
-		return UserInfo{}, ErrSessionManagerClosed
+		return UserInfo{}, AccountConfigResult{}, ErrSessionManagerClosed
 	}
 	if err := exchangeCtx.Err(); err != nil {
-		return UserInfo{}, err
+		return UserInfo{}, AccountConfigResult{}, err
 	}
 	if m.onConfigured != nil {
-		if err := m.onConfigured(exchangeCtx, tokens, sess.clientID, sess.clientSecret, user); err != nil {
-			return UserInfo{}, fmt.Errorf("activate account: %w", err)
+		result, err = m.onConfigured(exchangeCtx, sess.opts, tokens, sess.clientID, sess.clientSecret, user)
+		var committed *config.CommitError
+		if err != nil && !errors.As(err, &committed) {
+			return UserInfo{}, AccountConfigResult{}, fmt.Errorf("activate account: %w", err)
 		}
 	}
-	return user, nil
+	return user, result, err
+}
+
+// ConsumeSessionKey erases the issued key secret for a session so it cannot be read again.
+func (m *SessionManager) ConsumeSessionKey(sessionID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if sess, ok := m.sessions[sessionID]; ok {
+		sess.resultConfig.KeySecret = ""
+	}
+}
+
+// GetSession retrieves the current status of a login session by ID.
+func (m *SessionManager) GetSession(sessionID string) (SessionStatus, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var sess *loginSession
+	if m.sessions != nil {
+		sess = m.sessions[sessionID]
+	}
+	if sess == nil {
+		if m.active != nil && m.active.id == sessionID {
+			sess = m.active
+		} else {
+			return SessionStatus{}, false
+		}
+	}
+	status := SessionStatus{
+		ID:        sess.id,
+		Status:    string(sess.status),
+		AuthURL:   sess.authURL,
+		ExpiresAt: sess.expiresAt,
+	}
+	if sess.status == sessionCompleted {
+		status.AccountID = sess.resultConfig.AccountID
+		status.Email = sess.resultUser.Email
+		status.Name = sess.resultUser.Name
+		if sess.resultConfig.KeySecret != "" {
+			status.Key = &IssuedKey{
+				ID:     sess.resultConfig.KeyID,
+				Label:  sess.opts.IssueKey,
+				Secret: sess.resultConfig.KeySecret,
+			}
+			// One-time retrieval: erase once read
+			sess.resultConfig.KeySecret = ""
+		}
+	} else if sess.result != nil {
+		status.Error = sess.result.Error()
+	}
+	return status, true
 }
 
 func (m *SessionManager) stopExpiryTimerLocked(sess *loginSession) {
