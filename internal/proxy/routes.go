@@ -58,7 +58,8 @@ func (route apiRoute) accessLabel() (string, string) {
 		return "unmatched", ""
 	}
 	for _, c := range route.model {
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.') {
+		isModelChar := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.'
+		if !isModelChar {
 			return "unmatched", ""
 		}
 	}

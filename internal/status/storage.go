@@ -1,6 +1,8 @@
 package status
 
 import (
+	"antigravity-proxy/internal/atomicfile"
+	"antigravity-proxy/internal/quota"
 	"bufio"
 	"crypto/sha256"
 	"encoding/json"
@@ -12,9 +14,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-
-	"antigravity-proxy/internal/atomicfile"
-	"antigravity-proxy/internal/quota"
 )
 
 // historyStorage separates the three durability boundaries of replacement.
@@ -62,7 +61,7 @@ func (c *Collector) cleanHistoryTemps() error {
 	if err != nil {
 		return fmt.Errorf("open quota history directory for cleanup: %w", err)
 	}
-	defer directory.Close()
+	defer func() { _ = directory.Close() }()
 	removed := false
 	for {
 		entries, readErr := directory.ReadDir(64)
@@ -178,8 +177,8 @@ func (c *Collector) replaceHistory(samples []quota.Snapshot, next *quota.Snapsho
 		return fmt.Errorf("compact quota history: %w", err)
 	}
 	name := temp.Name()
-	defer os.Remove(name)
-	defer temp.Close()
+	defer func() { _ = os.Remove(name) }()
+	defer func() { _ = temp.Close() }()
 	writer := bufio.NewWriterSize(temp, 64<<10)
 	encoder := json.NewEncoder(writer)
 	for _, sample := range samples {

@@ -1,6 +1,9 @@
 package status
 
 import (
+	"antigravity-proxy/internal/config"
+	"antigravity-proxy/internal/quota"
+	"antigravity-proxy/internal/testutil"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -16,11 +19,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"antigravity-proxy/internal/testutil"
-
-	"antigravity-proxy/internal/config"
-	"antigravity-proxy/internal/quota"
 )
 
 type limitResponse struct {

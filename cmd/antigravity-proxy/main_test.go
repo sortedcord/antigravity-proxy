@@ -28,6 +28,17 @@ func TestHelpDoesNotLoadConfiguration(t *testing.T) {
 	}
 }
 
+func TestVersionDoesNotLoadConfiguration(t *testing.T) {
+	t.Setenv("PORT", "invalid")
+	var output bytes.Buffer
+	if err := run([]string{"version"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(output.String(), "antigravity-proxy v") {
+		t.Fatalf("version output = %q", output.String())
+	}
+}
+
 func TestRunReturnsConfigurationError(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

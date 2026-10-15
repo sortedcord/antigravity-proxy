@@ -1,6 +1,8 @@
 package oauth
 
 import (
+	"antigravity-proxy/internal/config"
+	"antigravity-proxy/internal/testutil"
 	"context"
 	"encoding/json"
 	"io"
@@ -15,10 +17,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"antigravity-proxy/internal/testutil"
-
-	"antigravity-proxy/internal/config"
 )
 
 func clearOAuthEnvironment(t *testing.T) {

@@ -1,6 +1,10 @@
 package status
 
 import (
+	"antigravity-proxy/internal/config"
+	"antigravity-proxy/internal/httpjson"
+	"antigravity-proxy/internal/lifecycle"
+	"antigravity-proxy/internal/quota"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -12,12 +16,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"antigravity-proxy/internal/httpjson"
-
-	"antigravity-proxy/internal/config"
-	"antigravity-proxy/internal/lifecycle"
-	"antigravity-proxy/internal/quota"
 )
 
 // Service owns account-scoped polling and its HTTP status API. Construct it,

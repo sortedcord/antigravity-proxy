@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"antigravity-proxy/internal/apikey"
+	"antigravity-proxy/internal/config"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -11,9 +13,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"antigravity-proxy/internal/apikey"
-	"antigravity-proxy/internal/config"
 )
 
 func newMultiAccountTestServer(t *testing.T) (*Runtime, string, string, string) {

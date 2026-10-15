@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"antigravity-proxy/internal/httpjson"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -11,8 +12,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
-	"antigravity-proxy/internal/httpjson"
 )
 
 // antigravityModelMetadata supplies public-model eligibility; model ID names do
@@ -58,7 +57,7 @@ func (p *Proxy) fetchRawModelCatalog(ctx context.Context, token, project string)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	const maxCatalogSize = 8 << 20
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCatalogSize+1))
 	if err != nil {

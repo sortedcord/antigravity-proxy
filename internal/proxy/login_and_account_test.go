@@ -1,6 +1,12 @@
 package proxy
 
 import (
+	"antigravity-proxy/internal/apikey"
+	"antigravity-proxy/internal/config"
+	"antigravity-proxy/internal/oauth"
+	"antigravity-proxy/internal/quota"
+	"antigravity-proxy/internal/status"
+	"antigravity-proxy/internal/testutil"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -17,14 +23,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"antigravity-proxy/internal/testutil"
-
-	"antigravity-proxy/internal/apikey"
-	"antigravity-proxy/internal/config"
-	"antigravity-proxy/internal/oauth"
-	"antigravity-proxy/internal/quota"
-	"antigravity-proxy/internal/status"
 )
 
 type runtimeProvider struct {

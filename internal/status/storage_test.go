@@ -1,6 +1,8 @@
 package status
 
 import (
+	"antigravity-proxy/internal/config"
+	"antigravity-proxy/internal/quota"
 	"bufio"
 	"bytes"
 	"context"
@@ -17,9 +19,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"antigravity-proxy/internal/config"
-	"antigravity-proxy/internal/quota"
 )
 
 func openRetainedCollector(t *testing.T, path string, maxSamples int, fetch FetchFunc) *Collector {
@@ -673,16 +672,17 @@ func TestProductionHistoryHandlesCanTruncateAndReopen(t *testing.T) {
 			fetch := func(context.Context) (quota.Snapshot, error) { return all[2], nil }
 			c := openRetainedCollector(t, path, 2, fetch)
 			retained := all[:2]
-			if scenario == "failed replacement" {
+			switch scenario {
+			case "failed replacement":
 				c.storage.replace = func(string, string) error { return errors.New("injected replacement failure") }
 				c.poll(context.Background())
 				if info := requireSnapshot(t, c, all[1]); !strings.Contains(info.LastError, "injected replacement") {
 					t.Fatalf("replacement failure = %q", info.LastError)
 				}
-			} else if scenario == "live replacement" {
-				c.poll(context.Background())
-				retained = all[1:]
-			} else if scenario == "startup replacement" {
+			case "live replacement", "startup replacement":
+				if scenario == "live replacement" {
+					c.poll(context.Background())
+				}
 				retained = all[1:]
 			}
 			requireRetainedHistory(t, c, path, retained)

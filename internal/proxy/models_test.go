@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"antigravity-proxy/internal/config"
+	"antigravity-proxy/internal/testutil"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -14,9 +16,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"antigravity-proxy/internal/config"
-	"antigravity-proxy/internal/testutil"
 )
 
 type catalogTestList struct {

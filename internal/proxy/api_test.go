@@ -1,14 +1,13 @@
 package proxy
 
 import (
+	"antigravity-proxy/internal/config"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"antigravity-proxy/internal/config"
 )
 
 func TestNonGeminiAPIRoutesAreUnsupported(t *testing.T) {

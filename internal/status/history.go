@@ -1,13 +1,12 @@
 package status
 
 import (
+	"antigravity-proxy/internal/quota"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
-
-	"antigravity-proxy/internal/quota"
 )
 
 // Query selects observation times inclusively and pages flattened quota buckets.

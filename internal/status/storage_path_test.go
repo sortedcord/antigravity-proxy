@@ -1,6 +1,7 @@
 package status
 
 import (
+	"antigravity-proxy/internal/quota"
 	"bufio"
 	"bytes"
 	"context"
@@ -13,8 +14,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"antigravity-proxy/internal/quota"
 )
 
 func createHistorySymlink(t *testing.T, target, path string) {

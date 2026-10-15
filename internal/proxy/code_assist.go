@@ -68,7 +68,7 @@ func (p *Proxy) fetchCodeAssist(ctx context.Context, token string) (*codeAssistR
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var load codeAssistResponse
 	if err := decodeBoundedJSON(resp.Body, 1<<20, &load); err != nil {
 		if ctx.Err() != nil {

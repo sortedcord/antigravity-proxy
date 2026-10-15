@@ -2,13 +2,12 @@
 package proxy
 
 import (
+	"antigravity-proxy/internal/httpjson"
 	"crypto/subtle"
 	"errors"
 	"net/http"
 	"strings"
 	"time"
-
-	"antigravity-proxy/internal/httpjson"
 )
 
 // ServeHTTP serves health, model discovery, native Gemini generation, and quota status.

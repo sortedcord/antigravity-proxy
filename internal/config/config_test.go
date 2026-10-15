@@ -1,15 +1,14 @@
 package config
 
 import (
+	"antigravity-proxy/internal/apikey"
+	"antigravity-proxy/internal/testutil"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
-
-	"antigravity-proxy/internal/apikey"
-	"antigravity-proxy/internal/testutil"
 )
 
 func TestValidateCloudEndpointRequiresTLSExceptLoopback(t *testing.T) {

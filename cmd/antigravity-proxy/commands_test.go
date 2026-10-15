@@ -1,15 +1,14 @@
 package main
 
 import (
+	"antigravity-proxy/internal/apikey"
+	"antigravity-proxy/internal/config"
 	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"antigravity-proxy/internal/apikey"
-	"antigravity-proxy/internal/config"
 )
 
 func setupTestConfig(t *testing.T) (config.Config, string) {

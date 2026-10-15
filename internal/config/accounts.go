@@ -1,6 +1,7 @@
 package config
 
 import (
+	"antigravity-proxy/internal/apikey"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -11,8 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"antigravity-proxy/internal/apikey"
 )
 
 // ErrUnloadableConfig means an account update was rejected because the resulting

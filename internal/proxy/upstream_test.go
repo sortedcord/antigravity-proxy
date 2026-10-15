@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"antigravity-proxy/internal/config"
+	"antigravity-proxy/internal/testutil"
 	"bytes"
 	"context"
 	"errors"
@@ -13,10 +15,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"antigravity-proxy/internal/testutil"
-
-	"antigravity-proxy/internal/config"
 )
 
 func TestUpstreamFallbackStatusPolicy(t *testing.T) {
@@ -84,8 +82,10 @@ func TestUpstreamTransportFailureFallbackAndSecrecy(t *testing.T) {
 		t.Fatal("transport failure did not fall back")
 	}
 	p.cfg.ProdEndpoint = endpoint
-	_, err = p.postToAntigravity(context.Background(), "credential-secret", "/operation?secret=query", "application/json", nil)
-	if err == nil || strings.Contains(err.Error(), endpoint) || strings.Contains(err.Error(), "secret") {
+	if failResp, err := p.postToAntigravity(context.Background(), "credential-secret", "/operation?secret=query", "application/json", nil); err == nil {
+		_ = failResp.Body.Close()
+		t.Fatal("expected failure")
+	} else if strings.Contains(err.Error(), endpoint) || strings.Contains(err.Error(), "secret") {
 		t.Fatalf("unsafe transport error: %v", err)
 	}
 }
@@ -470,11 +470,17 @@ func TestStaleProjectFailureCannotClearRediscoveredSameID(t *testing.T) {
 	}
 	oldRequest := make(chan error, 1)
 	go func() {
-		_, err := p.postToAntigravity(context.Background(), "token", "/operation", "application/json", map[string]string{"project": "same-project"})
+		resp, err := p.postToAntigravity(context.Background(), "token", "/operation", "application/json", map[string]string{"project": "same-project"})
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
 		oldRequest <- err
 	}()
 	<-started
-	if _, err := p.postToAntigravity(context.Background(), "token", "/operation", "application/json", map[string]string{"project": "same-project"}); err == nil {
+	if resp, err := p.postToAntigravity(context.Background(), "token", "/operation", "application/json", map[string]string{"project": "same-project"}); err == nil {
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
 		t.Fatal("project rejection lost")
 	}
 	if _, err := p.getProjectID(context.Background(), "token"); err != nil {
@@ -523,8 +529,11 @@ func TestUpstreamLogsAndOAuthErrorsExcludeSecrets(t *testing.T) {
 	}))
 	defer upstream.Close()
 	p := New(config.Config{DailyEndpoint: upstream.URL, ProdEndpoint: upstream.URL})
-	_, err := p.postToAntigravity(context.Background(), "token-secret", "/operation?query-secret=value", "application/json", nil)
+	resp, err := p.postToAntigravity(context.Background(), "token-secret", "/operation?query-secret=value", "application/json", nil)
 	if err == nil {
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
 		t.Fatal("missing provider failure")
 	}
 	p.cfg.RefreshToken = "refresh-secret"

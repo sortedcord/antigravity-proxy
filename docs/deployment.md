@@ -54,7 +54,7 @@ docker run -d \
   antigravity-proxy
 ```
 
-Do not supply token environment overrides for runtime login. The server remains up without a Google account; protected generation and model requests return `503` until login commits. Fetch the authorization URL with an API-key header, then submit `code`/`state` or the full loopback redirect URL as described in the [API reference](api.md#runtime-account-configuration). A browser outside the container normally cannot reach its loopback callback, so use manual submission or a tunnel. Remote management requests require HTTPS or an encrypted tunnel.
+Do not supply token environment overrides for runtime login. The server remains up without a Google account; protected generation and model requests return `503` until login commits. Fetch the authorization URL with an API-key header, then submit `code`/`state` or the full loopback redirect URL as described in the [API reference](api.md#oauth-login-sessions). A browser outside the container normally cannot reach its loopback callback, so use manual submission or a tunnel. Remote management requests require HTTPS or an encrypted tunnel.
 
 Account identity is persisted with credentials, and quota journals use hashed account namespaces. Preserve the entire history directory across restarts; old unlabelled journals are kept untouched.
 

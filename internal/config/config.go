@@ -2,6 +2,8 @@
 package config
 
 import (
+	"antigravity-proxy/internal/apikey"
+	"antigravity-proxy/internal/atomicfile"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -14,9 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"antigravity-proxy/internal/apikey"
-	"antigravity-proxy/internal/atomicfile"
 )
 
 const (
@@ -449,7 +448,7 @@ func readConfig(path string, cfg *Config) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("stat config %s: %w", path, err)
@@ -655,16 +654,16 @@ func saveConfigBytesWithFS(path string, data []byte, fs configFilesystem) error 
 		if err != nil {
 			return fmt.Errorf("open config directory for sync: %w", err)
 		}
-		defer directory.Close()
+		defer func() { _ = directory.Close() }()
 	}
 	file, err := fs.createTemp(dir, "."+filepath.Base(path)+"-*")
 	if err != nil {
 		return fmt.Errorf("create temporary config: %w", err)
 	}
 	tmp := file.Name()
-	defer fs.remove(tmp)
-	defer file.Close()
-	record := append(data, '\n')
+	defer func() { _ = fs.remove(tmp) }()
+	defer func() { _ = file.Close() }()
+	record := append(append([]byte(nil), data...), '\n')
 	n, err := file.Write(record)
 	if err == nil && n != len(record) {
 		err = io.ErrShortWrite

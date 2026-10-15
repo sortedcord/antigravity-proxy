@@ -1,6 +1,7 @@
 package status
 
 import (
+	"antigravity-proxy/internal/quota"
 	"context"
 	"encoding/json"
 	"math"
@@ -10,8 +11,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"antigravity-proxy/internal/quota"
 )
 
 func observation(at time.Time, remaining float64) quota.Snapshot {

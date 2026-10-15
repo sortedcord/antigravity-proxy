@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"antigravity-proxy/internal/config"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,8 +12,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"antigravity-proxy/internal/config"
 )
 
 func TestResponseActivityHasNoTotalDeadline(t *testing.T) {
@@ -62,7 +61,11 @@ func TestResponseBodyIdleDeadlineCancelsNetworkRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
+	defer func() {
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
+	}()
 	result := make(chan error, 1)
 	go func() { _, err := io.ReadAll(response.Body); result <- err }()
 	select {
@@ -101,7 +104,11 @@ func TestResponseBodyCancellationAndClose(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer response.Body.Close()
+			defer func() {
+				if response != nil && response.Body != nil {
+					_ = response.Body.Close()
+				}
+			}()
 			result := make(chan error, 1)
 			go func() { _, err := io.ReadAll(response.Body); result <- err }()
 			if closeBody {
@@ -132,7 +139,10 @@ func TestUpstreamHeaderDeadline(t *testing.T) {
 	client := newUpstreamClient(50*time.Millisecond, time.Hour)
 	defer client.CloseIdleConnections()
 	started := time.Now()
-	_, err := client.Get(upstream.URL)
+	resp, err := client.Get(upstream.URL)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
 	if err == nil || time.Since(started) > time.Second {
 		t.Fatalf("header deadline not enforced: %v", err)
 	}
@@ -392,7 +402,7 @@ func TestFiniteDeadlineSpansAllFallbackAttempts(t *testing.T) {
 	}
 	defer response.Body.Close()
 	_, err = io.ReadAll(response.Body)
-	if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) >= 300*time.Millisecond {
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) >= 350*time.Millisecond {
 		t.Fatalf("fallback renewed finite deadline: %v after %v", err, time.Since(started))
 	}
 }

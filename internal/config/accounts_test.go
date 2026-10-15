@@ -1,15 +1,14 @@
 package config
 
 import (
+	"antigravity-proxy/internal/apikey"
+	"antigravity-proxy/internal/testutil"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"antigravity-proxy/internal/apikey"
-	"antigravity-proxy/internal/testutil"
 )
 
 func TestValidateAccountID(t *testing.T) {

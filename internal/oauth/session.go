@@ -1,6 +1,8 @@
 package oauth
 
 import (
+	"antigravity-proxy/internal/config"
+	"antigravity-proxy/internal/lifecycle"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -14,9 +16,6 @@ import (
 	"sync"
 	"time"
 	"unicode"
-
-	"antigravity-proxy/internal/config"
-	"antigravity-proxy/internal/lifecycle"
 )
 
 const (
@@ -115,7 +114,7 @@ func fetchUserInfo(ctx context.Context, client *http.Client, accessToken string)
 	if err != nil {
 		return UserInfo{}, errors.New("fetch user info: request failed")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return UserInfo{}, fmt.Errorf("fetch user info: Google returned HTTP %d (%s)", resp.StatusCode, http.StatusText(resp.StatusCode))
 	}

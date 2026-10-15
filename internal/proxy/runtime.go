@@ -1,6 +1,13 @@
 package proxy
 
 import (
+	"antigravity-proxy/internal/apikey"
+	"antigravity-proxy/internal/config"
+	"antigravity-proxy/internal/httpjson"
+	"antigravity-proxy/internal/lifecycle"
+	"antigravity-proxy/internal/oauth"
+	"antigravity-proxy/internal/quota"
+	"antigravity-proxy/internal/status"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,14 +20,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"antigravity-proxy/internal/apikey"
-	"antigravity-proxy/internal/config"
-	"antigravity-proxy/internal/httpjson"
-	"antigravity-proxy/internal/lifecycle"
-	"antigravity-proxy/internal/oauth"
-	"antigravity-proxy/internal/quota"
-	"antigravity-proxy/internal/status"
 )
 
 type accountRuntime struct {
@@ -305,9 +304,11 @@ func (r *Runtime) rebuildRegistry(accounts []config.Account, previousReg *runtim
 			prev = prevAccounts[accCfg.ID]
 		}
 		var acc *accountRuntime
-		if prev != nil && accountUnchanged(prev, accCfg) {
+		var err error
+		switch {
+		case prev != nil && accountUnchanged(prev, accCfg):
 			acc = prev
-		} else if prev != nil && accountMetaOnlyChanged(prev, accCfg) {
+		case prev != nil && accountMetaOnlyChanged(prev, accCfg):
 			acc = &accountRuntime{
 				id:        prev.id,
 				label:     accCfg.Label,
@@ -317,8 +318,7 @@ func (r *Runtime) rebuildRegistry(accounts []config.Account, previousReg *runtim
 				status:    prev.status,
 				namespace: prev.namespace,
 			}
-		} else {
-			var err error
+		default:
 			acc, err = r.prepareAccount(accCfg, nil, prev)
 			if err != nil {
 				// Clean up newly started services on error
@@ -364,11 +364,9 @@ func (r *Runtime) rebuildRegistry(accounts []config.Account, previousReg *runtim
 	}
 
 	// Close status services for accounts that were removed or changed status instance
-	if prevAccounts != nil {
-		for id, oldAcc := range prevAccounts {
-			if next, stillPresent := newAccounts[id]; !stillPresent || next.status != oldAcc.status {
-				_ = oldAcc.status.Close()
-			}
+	for id, oldAcc := range prevAccounts {
+		if next, stillPresent := newAccounts[id]; !stillPresent || next.status != oldAcc.status {
+			_ = oldAcc.status.Close()
 		}
 	}
 
