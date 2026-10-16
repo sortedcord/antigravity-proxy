@@ -179,6 +179,11 @@ func accountNamespace(acc config.Account) string {
 
 func (r *Runtime) prepareAccount(accCfg config.Account, tokens *oauth.Tokens, previous *accountRuntime) (*accountRuntime, error) {
 	proxyCfg := r.base
+	// Runtime.ServeHTTP authenticates data requests against the key registry
+	// (per-account keys plus the env API_KEY binding) before dispatching, so
+	// account proxies must not re-check the global key. Otherwise valid
+	// per-account keys are rejected whenever API_KEY is set (#7).
+	proxyCfg.APIKey = ""
 	proxyCfg.AccessToken = accCfg.AccessToken
 	proxyCfg.RefreshToken = accCfg.RefreshToken
 	proxyCfg.OAuthClientID = accCfg.OAuthClientID

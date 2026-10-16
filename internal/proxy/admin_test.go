@@ -913,3 +913,64 @@ func TestDeleteLastKeyMultiAccountLoopbackReturns409(t *testing.T) {
 		t.Fatalf("key was removed despite rejection: %+v", loaded.Accounts[0].Keys)
 	}
 }
+
+// Regression test for #7: a per-account key must authenticate even when the
+// global API_KEY environment variable is configured.
+func TestPerAccountKeyAuthenticatesWhenEnvAPIKeySet(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "config.json")
+	disk := config.Config{
+		Host: "127.0.0.1",
+		Accounts: []config.Account{
+			{ID: "default", Enabled: true},
+			{
+				ID:      "acc_second",
+				Enabled: true,
+				Keys: []config.AccountKey{{
+					ID:    "key_second",
+					Hash:  apikey.Hash("account-secret"),
+					Last4: apikey.Last4("account-secret"),
+				}},
+			},
+		},
+		AdminAPIKey:              "admin-secret",
+		AdminKeyHash:             apikey.Hash("admin-secret"),
+		QuotaHistoryPath:         filepath.Join(home, "usage.jsonl"),
+		QuotaPollIntervalSeconds: 3600,
+		QuotaHistoryMaxSamples:   10,
+	}
+	if err := config.Save(path, disk); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := disk
+	t.Setenv("API_KEY", "env-secret")
+	cfg.APIKey = "env-secret"
+	cfg.Env.HasAPIKey = true
+	cfg.Env.APIKey = "env-secret"
+	r, err := NewRuntime(context.Background(), cfg, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	for _, tc := range []struct {
+		name, key string
+		wantAuth  bool
+	}{
+		{name: "per-account key", key: "account-secret", wantAuth: true},
+		{name: "env key", key: "env-secret", wantAuth: true},
+		{name: "unknown key", key: "wrong-secret", wantAuth: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/v1beta/models", nil)
+			req.Header.Set("x-goog-api-key", tc.key)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			gotAuth := w.Code != http.StatusUnauthorized
+			if gotAuth != tc.wantAuth {
+				t.Fatalf("key %q: status %d, want authenticated=%v; body=%s", tc.key, w.Code, tc.wantAuth, w.Body.String())
+			}
+		})
+	}
+}
