@@ -228,7 +228,9 @@ curl http://127.0.0.1:8080/status/limit \
 
 ### `GET /status/usage`
 
-Queries durable historical quota observations persisted in `usage.jsonl`.
+> **Note:** Disk persistence of historical metrics has been removed. `GET /status/usage`
+> validates query parameters and returns an empty entry page (`{"entries": []}`) for
+> backward compatibility with monitoring clients. Live limits are available via `/status/limit`.
 
 **Query Parameters:**
 | Parameter | Accepted Values | Default |

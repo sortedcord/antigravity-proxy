@@ -89,10 +89,10 @@ type Config struct {
 	ProdEndpoint  string `json:"prodEndpoint,omitempty"`
 	// QuotaPollIntervalSeconds is the positive interval between quota polls in seconds.
 	QuotaPollIntervalSeconds int `json:"quotaPollIntervalSeconds,omitempty"`
-	// QuotaHistoryPath is the JSONL file used to persist quota observations.
-	QuotaHistoryPath string `json:"quotaHistoryPath,omitempty"`
-	// QuotaHistoryMaxSamples is the positive maximum number of retained observations.
-	QuotaHistoryMaxSamples int `json:"quotaHistoryMaxSamples,omitempty"`
+	// Deprecated: quota history is no longer persisted. QuotaHistoryPath and
+	// QuotaHistoryMaxSamples are accepted so existing configs still load, but ignored.
+	QuotaHistoryPath       string `json:"quotaHistoryPath,omitempty"`
+	QuotaHistoryMaxSamples int    `json:"quotaHistoryMaxSamples,omitempty"`
 	// ClientVersion is shared by generation and quota upstream transports.
 	ClientVersion string `json:"clientVersion,omitempty"`
 	// MaxConcurrentGenerations bounds simultaneously processed generation requests.
@@ -303,12 +303,6 @@ func (cfg Config) Validate() error {
 	}
 	if err := ValidatePollInterval(cfg.QuotaPollIntervalSeconds); err != nil {
 		return err
-	}
-	if strings.TrimSpace(cfg.QuotaHistoryPath) == "" {
-		return fmt.Errorf("quotaHistoryPath must not be empty")
-	}
-	if cfg.QuotaHistoryMaxSamples <= 0 {
-		return fmt.Errorf("quotaHistoryMaxSamples must be a positive integer")
 	}
 	if cfg.MaxConcurrentGenerations <= 0 {
 		return fmt.Errorf("maxConcurrentGenerations must be a positive integer")

@@ -178,7 +178,6 @@ func TestLoadResourceOverrides(t *testing.T) {
 
 func TestLoadRejectsInvalidResourceSettings(t *testing.T) {
 	for _, field := range []struct{ key, env string }{
-		{"quotaHistoryMaxSamples", "ANTIGRAVITY_QUOTA_HISTORY_MAX_SAMPLES"},
 		{"maxConcurrentGenerations", "ANTIGRAVITY_MAX_CONCURRENT_GENERATIONS"},
 	} {
 		for _, value := range []string{"0", "-1", "", "invalid", "999999999999999999999999999"} {

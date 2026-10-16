@@ -3,7 +3,6 @@
 package status
 
 import (
-	"antigravity-proxy/internal/config"
 	"antigravity-proxy/internal/quota"
 	"context"
 	"errors"
@@ -25,15 +24,10 @@ type Collector struct {
 }
 
 // Open initializes in-memory quota tracking without touching disk.
+// The path and maxSamples arguments are retained for compatibility and ignored.
 func Open(path string, interval time.Duration, maxSamples int, fetch FetchFunc) (*Collector, error) {
 	if interval <= 0 {
 		return nil, errors.New("quota poll interval must be positive")
-	}
-	if maxSamples == 0 {
-		maxSamples = config.DefaultQuotaHistoryMaxSamples
-	}
-	if maxSamples < 1 {
-		return nil, errors.New("quota history max samples must be positive")
 	}
 	if fetch == nil {
 		return nil, errors.New("quota fetch function is nil")

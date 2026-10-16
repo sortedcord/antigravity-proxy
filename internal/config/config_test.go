@@ -159,8 +159,6 @@ func TestLoadRejectsInvalidQuotaConfiguration(t *testing.T) {
 		{name: "JSON string", config: `{"quotaPollIntervalSeconds":"300"}`, wantErr: "quotaPollIntervalSeconds"},
 		{name: "JSON duration overflow", config: `{"quotaPollIntervalSeconds":9223372037}`, wantErr: "quotaPollIntervalSeconds"},
 		{name: "JSON integer overflow", config: `{"quotaPollIntervalSeconds":9223372036854775808}`, wantErr: "quotaPollIntervalSeconds"},
-		{name: "JSON empty history", config: `{"quotaHistoryPath":""}`, wantErr: "quotaHistoryPath"},
-		{name: "JSON whitespace history", config: `{"quotaHistoryPath":" \t"}`, wantErr: "quotaHistoryPath"},
 		{name: "environment zero", envName: "ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS", env: "0", wantErr: "quotaPollIntervalSeconds"},
 		{name: "environment negative", envName: "ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS", env: "-1", wantErr: "quotaPollIntervalSeconds"},
 		{name: "environment fractional", envName: "ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS", env: "1.5", wantErr: "ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS"},
@@ -168,8 +166,6 @@ func TestLoadRejectsInvalidQuotaConfiguration(t *testing.T) {
 		{name: "environment empty interval", envName: "ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS", env: "", wantErr: "ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS"},
 		{name: "environment duration overflow", envName: "ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS", env: "9223372037", wantErr: "positive integer"},
 		{name: "environment integer overflow", envName: "ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS", env: "9223372036854775808", wantErr: "ANTIGRAVITY_QUOTA_POLL_INTERVAL_SECONDS"},
-		{name: "environment empty history", envName: "ANTIGRAVITY_QUOTA_HISTORY_PATH", env: "", wantErr: "quotaHistoryPath"},
-		{name: "environment whitespace history", envName: "ANTIGRAVITY_QUOTA_HISTORY_PATH", env: " \t", wantErr: "quotaHistoryPath"},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
