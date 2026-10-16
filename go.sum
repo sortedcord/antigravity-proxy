@@ -8,3 +8,7 @@ github.com/terastal-hq/proxylib v0.2.2 h1:ICnK3NOMD2Y2fU8KL72yjD8f578JDgggnZSrDt
 github.com/terastal-hq/proxylib v0.2.2/go.mod h1:1Q0a88o3KYEjpO1RE5ICjgJWIsXDOPaDNjnDn1mzoSY=
 github.com/terastal-hq/proxylib v0.2.3 h1:RZApLB75tRjsm+/eQcPwhujUcppLOMEFcQIczxVSbwg=
 github.com/terastal-hq/proxylib v0.2.3/go.mod h1:1Q0a88o3KYEjpO1RE5ICjgJWIsXDOPaDNjnDn1mzoSY=
+github.com/terastal-hq/proxylib v0.2.4 h1:HTTttzlCk7D3rSOrS5wyPNgzPIxS7m2OmSTX28kkPvY=
+github.com/terastal-hq/proxylib v0.2.4/go.mod h1:1Q0a88o3KYEjpO1RE5ICjgJWIsXDOPaDNjnDn1mzoSY=
+github.com/terastal-hq/proxylib v0.2.5 h1:H2euqP1iTuIUaK91aG+LX+qIir7Q/S1OdXvoyMA50K0=
+github.com/terastal-hq/proxylib v0.2.5/go.mod h1:1Q0a88o3KYEjpO1RE5ICjgJWIsXDOPaDNjnDn1mzoSY=

@@ -126,17 +126,7 @@ type Credentials struct {
 // CommitError means the configuration was replaced, but directory durability was
 // not confirmed. Callers must use the committed credentials rather than report
 // that the old configuration remains active.
-type CommitError struct {
-	Err error
-}
-
-func (err *CommitError) Error() string {
-	return "configuration was replaced, but its durability could not be confirmed; retry saving to confirm durability"
-}
-
-func (err *CommitError) Unwrap() error {
-	return err.Err
-}
+type CommitError = privatefile.CommitError
 
 // Load reads ~/.config/antigravity-proxy/config.json, applies defaults and
 // environment overrides, and validates listener, upstream, and quota settings.
