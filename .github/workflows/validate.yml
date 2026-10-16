@@ -1,0 +1,114 @@
+name: Validate
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go-test:
+    name: Go Test (${{ matrix.go }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.22.x', '1.27.2', 'stable']
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ matrix.go }}
+          cache: false
+      - name: Run race tests
+        run: ./scripts/ci/test.sh
+
+  build:
+    name: Native Build & Identity
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.2'
+          cache: false
+      - name: Build executable
+        run: ./scripts/build.sh
+      - name: Verify build identity
+        run: |
+          bin_path=$(find bin -maxdepth 1 -type f | head -n 1)
+          "$bin_path" version
+
+  container:
+    name: Container Build & Hardened Runtime Smoke Test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Run container smoke test
+        run: ./scripts/ci/test-container.sh
+
+  artifacts:
+    name: Package and Verify Release Archives
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.2'
+          cache: false
+      - name: Package snapshot archives
+        run: ./scripts/ci/test-artifacts.sh
+
+  native-platforms:
+    name: Platform Validation (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.2'
+          cache: false
+      - name: Run platform verification
+        shell: bash
+        run: ./scripts/ci/test-platform.sh
+
+  project-checks:
+    name: Project Specific Checks
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.2'
+          cache: false
+      - name: Run project checks
+        run: ./scripts/ci/test-project.sh

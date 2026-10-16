@@ -72,7 +72,7 @@ func (f *Fetcher) Fetch(ctx context.Context) (Snapshot, error) {
 		}
 		return Snapshot{}, errors.New("quota request failed")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	const maxQuotaSize = 8 << 20
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxQuotaSize+1))
 	if err != nil {

@@ -1,10 +1,9 @@
 package proxy
 
 import (
+	"antigravity-proxy/internal/oauth"
 	"context"
 	"errors"
-
-	"antigravity-proxy/internal/oauth"
 )
 
 // SubscriptionInfo describes an authoritative tier returned by the provider.

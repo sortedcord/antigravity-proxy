@@ -1,6 +1,12 @@
 package proxy
 
 import (
+	"antigravity-proxy/internal/apikey"
+	"antigravity-proxy/internal/config"
+	"antigravity-proxy/internal/httpjson"
+	"antigravity-proxy/internal/oauth"
+	"antigravity-proxy/internal/quota"
+	"antigravity-proxy/internal/status"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,13 +16,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-
-	"antigravity-proxy/internal/apikey"
-	"antigravity-proxy/internal/config"
-	"antigravity-proxy/internal/httpjson"
-	"antigravity-proxy/internal/oauth"
-	"antigravity-proxy/internal/quota"
-	"antigravity-proxy/internal/status"
 )
 
 func writePersistError(w http.ResponseWriter, err error) {

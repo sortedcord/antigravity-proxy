@@ -1,13 +1,12 @@
 package proxy
 
 import (
-	"context"
-	"errors"
-	"net/http"
-
 	"antigravity-proxy/internal/config"
 	"antigravity-proxy/internal/httpjson"
 	"antigravity-proxy/internal/oauth"
+	"context"
+	"errors"
+	"net/http"
 )
 
 func writeLoginError(w http.ResponseWriter, err error) {

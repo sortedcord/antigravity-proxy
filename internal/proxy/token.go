@@ -1,16 +1,15 @@
 package proxy
 
 import (
+	"antigravity-proxy/internal/config"
+	"antigravity-proxy/internal/oauth"
+	"antigravity-proxy/internal/quota"
 	"context"
 	"errors"
 	"log/slog"
 	"net/http"
 	"sync"
 	"time"
-
-	"antigravity-proxy/internal/config"
-	"antigravity-proxy/internal/oauth"
-	"antigravity-proxy/internal/quota"
 )
 
 // tokenSource owns refresh serialization and token lifetime. cfg and client are

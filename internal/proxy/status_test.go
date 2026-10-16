@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"antigravity-proxy/internal/config"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"antigravity-proxy/internal/config"
 	quotastatus "antigravity-proxy/internal/status"
 )
 

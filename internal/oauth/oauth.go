@@ -3,6 +3,8 @@
 package oauth
 
 import (
+	"antigravity-proxy/internal/apikey"
+	"antigravity-proxy/internal/config"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -19,9 +21,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"antigravity-proxy/internal/apikey"
-	"antigravity-proxy/internal/config"
 )
 
 const (
@@ -97,10 +96,6 @@ func LoginWithOptions(cfg config.Config, path string, opts SessionOptions) error
 	return loginWithOptions(cfg, path, os.Stdout, opts, nil)
 }
 
-func login(cfg config.Config, path string, output io.Writer) error {
-	return loginWithClient(cfg, path, output, nil)
-}
-
 func loginWithClient(cfg config.Config, path string, output io.Writer, client *http.Client) error {
 	return loginWithOptions(cfg, path, output, SessionOptions{}, client)
 }
@@ -164,10 +159,8 @@ func loginWithOptions(cfg config.Config, path string, output io.Writer, opts Ses
 					}
 				}
 
-				found := false
 				for i := range *accounts {
 					if (*accounts)[i].ID == targetID {
-						found = true
 						(*accounts)[i].ApplyCredentials(config.Credentials{
 							AccessToken:       accessToken,
 							RefreshToken:      tokens.RefreshToken,
@@ -183,36 +176,34 @@ func loginWithOptions(cfg config.Config, path string, output io.Writer, opts Ses
 						return nil
 					}
 				}
-				if !found {
-					var keys []config.AccountKey
-					if newKey != nil {
-						keys = append(keys, *newKey)
-					}
-					newAcc := config.Account{
-						ID:      targetID,
-						Label:   targetID,
-						Enabled: true,
-						Keys:    keys,
-					}
-					newAcc.ApplyCredentials(config.Credentials{
-						AccessToken:       accessToken,
-						RefreshToken:      tokens.RefreshToken,
-						OAuthClientID:     clientID,
-						OAuthClientSecret: clientSecret,
-						AccountID:         user.ID,
-						AccountEmail:      user.Email,
-						AccountName:       user.Name,
-					})
-					*accounts = append(*accounts, newAcc)
+				var keys []config.AccountKey
+				if newKey != nil {
+					keys = append(keys, *newKey)
 				}
+				newAcc := config.Account{
+					ID:      targetID,
+					Label:   targetID,
+					Enabled: true,
+					Keys:    keys,
+				}
+				newAcc.ApplyCredentials(config.Credentials{
+					AccessToken:       accessToken,
+					RefreshToken:      tokens.RefreshToken,
+					OAuthClientID:     clientID,
+					OAuthClientSecret: clientSecret,
+					AccountID:         user.ID,
+					AccountEmail:      user.Email,
+					AccountName:       user.Name,
+				})
+				*accounts = append(*accounts, newAcc)
 				return nil
 			})
 			if err != nil {
 				return AccountConfigResult{}, err
 			}
-			fmt.Fprintf(output, "Authorization saved for account %q (%s) to %s\n", targetID, user.Email, path)
+			_, _ = fmt.Fprintf(output, "Authorization saved for account %q (%s) to %s\n", targetID, user.Email, path)
 			if mintedSecret != "" {
-				fmt.Fprintf(output, "\nNew API key generated:\n  Key:   %s\n  ID:    %s\n  Label: %s\n\nSave this key now - it cannot be displayed again.\n", mintedSecret, mintedKeyID, sessionOpts.IssueKey)
+				_, _ = fmt.Fprintf(output, "\nNew API key generated:\n  Key:   %s\n  ID:    %s\n  Label: %s\n\nSave this key now - it cannot be displayed again.\n", mintedSecret, mintedKeyID, sessionOpts.IssueKey)
 			}
 			return AccountConfigResult{AccountID: targetID, KeyID: mintedKeyID, KeySecret: mintedSecret}, nil
 		}
@@ -221,13 +212,13 @@ func loginWithOptions(cfg config.Config, path string, output io.Writer, opts Ses
 			return AccountConfigResult{}, err
 		}
 		if tokens.RefreshToken == "" {
-			fmt.Fprintln(output, "Warning: Google did not return a refresh token; the saved access token expires.")
+			_, _ = fmt.Fprintln(output, "Warning: Google did not return a refresh token; the saved access token expires.")
 		}
-		fmt.Fprintf(output, "Authorization saved to %s\n", path)
+		_, _ = fmt.Fprintf(output, "Authorization saved to %s\n", path)
 		return AccountConfigResult{AccountID: "default"}, nil
 	})
 	manager.cli = true
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), sessionLifetime)
 	defer cancel()
 	info, err := manager.BeginWithOptions(ctx, opts)
@@ -238,9 +229,9 @@ func loginWithOptions(cfg config.Config, path string, output io.Writer, opts Ses
 	session := manager.active
 	manager.mu.Unlock()
 	if cfg.OAuthClientID != "" && cfg.OAuthClientID != session.clientID {
-		fmt.Fprintln(output, "Authorizing with the consumer OAuth client; existing credentials remain unchanged until login succeeds.")
+		_, _ = fmt.Fprintln(output, "Authorizing with the consumer OAuth client; existing credentials remain unchanged until login succeeds.")
 	}
-	fmt.Fprintf(output, "Open this URL to authorize Antigravity Proxy:\n\n%s\n\nWaiting for the local callback...\n", info.AuthURL)
+	_, _ = fmt.Fprintf(output, "Open this URL to authorize Antigravity Proxy:\n\n%s\n\nWaiting for the local callback...\n", info.AuthURL)
 	select {
 	case <-session.done:
 		return session.result
@@ -364,7 +355,7 @@ func postTokenForm(ctx context.Context, client *http.Client, form url.Values, op
 	if err != nil {
 		return Tokens{}, fmt.Errorf("%s: token endpoint request failed", operation)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return Tokens{}, fmt.Errorf("%s: Google returned HTTP %d (%s)", operation, resp.StatusCode, http.StatusText(resp.StatusCode))
 	}

@@ -2,10 +2,11 @@ name: Docker image
 
 on:
   push:
-    branches: [master]
-    tags: ['v*']
+    branches:
+      - master
   pull_request:
-    branches: [master]
+    branches:
+      - master
   workflow_dispatch:
 
 permissions:
@@ -20,34 +21,21 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  test:
-    name: Go checks
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Check out source
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          persist-credentials: false
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version-file: go.mod
-          cache: false
-      - name: Check formatting
-        run: |
-          files=$(gofmt -l cmd internal)
-          if [ -n "$files" ]; then
-            printf '%s\n' "$files"
-            exit 1
-          fi
-      - name: Vet
-        run: go vet ./...
-      - name: Race tests
-        run: go test -race -count=1 ./...
+  code-quality:
+    name: Code Quality
+    uses: ./.github/workflows/code-quality.yml
+
+  security:
+    name: Security
+    uses: ./.github/workflows/security.yml
+
+  validate:
+    name: Validation Pipeline
+    uses: ./.github/workflows/validate.yml
 
   docker:
-    name: Build and publish
-    needs: test
+    name: Build and publish container
+    needs: [code-quality, security, validate]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -57,6 +45,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
@@ -71,14 +60,27 @@ jobs:
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
           tags: |
             type=ref,event=branch
             type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
             type=sha,format=long
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+      - name: Resolve executable build identity
+        id: identity
+        run: |
+          set -eu
+          base_version=$(tr -d '\n\r' < internal/buildinfo/VERSION)
+          case "$base_version" in
+            v*) ;;
+            *) base_version="v$base_version" ;;
+          esac
+          {
+            echo "version=${base_version}-dev"
+            echo "commit=$(git rev-parse HEAD)"
+            echo "date=$(git show -s --format=%cI HEAD)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
@@ -95,6 +97,10 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
+          build-args: |
+            VERSION=${{ steps.identity.outputs.version }}
+            COMMIT=${{ steps.identity.outputs.commit }}
+            BUILD_DATE=${{ steps.identity.outputs.date }}
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
           cache-from: type=gha

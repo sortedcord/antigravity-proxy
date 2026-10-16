@@ -1,0 +1,42 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - errcheck
+    - gocritic
+    - govet
+    - ineffassign
+    - revive
+    - staticcheck
+    - unused
+  settings:
+    revive:
+      rules:
+        - name: indent-error-flow
+        - name: superfluous-else
+        - name: var-declaration
+  exclusions:
+    rules:
+      # Google and Antigravity are brand names. Keep ST1005 for other errors; do not contort wording.
+      - path: ^internal/(oauth|config|proxy)/
+        linters:
+          - staticcheck
+        text: 'ST1005: error strings should not be capitalized'
+        source: '(errors\.New|fmt\.Errorf)\("(Google|Antigravity) '
+      # Tests deliberately defer cleanup; production owns error propagation.
+      - path: _test\.go
+        linters:
+          - errcheck
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  exclusions:
+    paths:
+      - reference-projects

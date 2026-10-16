@@ -1,0 +1,61 @@
+name: Security
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4 * * 1' # Weekly on Monday at 04:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    name: Secret Detection
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Run secret scanner
+        run: python3 scripts/ci/check-security.py
+
+  govulncheck:
+    name: Go Vulnerability Analysis
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.2'
+          cache: false
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: Run govulncheck
+        run: govulncheck ./...
+
+  workflow-hygiene:
+    name: Workflow Policy and Parity Validation
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.2'
+          cache: false
+      - name: Install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+      - name: Validate workflow structure and lint
+        run: |
+          python3 scripts/ci/test-workflows.py
+          python3 scripts/ci/check-parity.py

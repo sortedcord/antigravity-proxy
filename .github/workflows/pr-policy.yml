@@ -1,0 +1,31 @@
+name: PR Title Policy
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+
+permissions:
+  contents: read
+
+jobs:
+  validate-title:
+    name: Validate Conventional Commit PR Title
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Validate PR Title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          echo "Checking PR title: '$PR_TITLE'"
+          regex='^((feat|fix|docs|chore|refactor|perf|test|ci|build)(\([a-zA-Z0-9_\-\./]+\))?!?:\s.+|chore\(main\):\srelease\s.+)$'
+          if ! printf '%s\n' "$PR_TITLE" | grep -Eq "$regex"; then
+            echo "Error: PR title must follow Conventional Commits format:" >&2
+            echo "  <type>(<scope>): <description>" >&2
+            echo "Examples: 'feat(api): add quota health endpoint', 'fix(auth): handle token refresh timeout'" >&2
+            exit 1
+          fi
+          echo "PR title is valid."

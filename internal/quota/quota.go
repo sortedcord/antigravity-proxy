@@ -180,17 +180,18 @@ func parseBucket(raw rawBucket, groupName string) (Bucket, error) {
 
 	status := StatusAvailable
 	unavailableReason := ""
-	if disabled {
+	switch {
+	case disabled:
 		status = StatusDisabled
 		unavailableReason = "upstream_disabled"
 		remainingAmount = nil
 		remainingFraction = nil
-	} else if reason != "" {
+	case reason != "":
 		status = StatusUnavailable
 		unavailableReason = reason
 		remainingAmount = nil
 		remainingFraction = nil
-	} else if remainingFraction == nil && remainingAmount == nil {
+	case remainingFraction == nil && remainingAmount == nil:
 		status = StatusUnavailable
 		unavailableReason = "quota_not_reported"
 	}

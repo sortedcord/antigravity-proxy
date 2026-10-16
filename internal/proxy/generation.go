@@ -47,7 +47,7 @@ func (payload generationEnvelope) requestBody() (func() io.Reader, int64, error)
 	if err != nil {
 		return nil, 0, err
 	}
-	prefix := append(metadata[:len(metadata)-1], `,"request":`...)
+	prefix := append(append([]byte(nil), metadata[:len(metadata)-1]...), `,"request":`...)
 	return func() io.Reader {
 		return io.MultiReader(bytes.NewReader(prefix), bytes.NewReader(payload.Request), strings.NewReader("}"))
 	}, int64(len(prefix)) + int64(len(payload.Request)) + 1, nil
@@ -79,7 +79,7 @@ func (p *Proxy) handleGenerateContent(w http.ResponseWriter, r *http.Request, mo
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxGenerationRequestSize)
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	request, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeGenerationRequestError(w, err)
@@ -122,7 +122,7 @@ func (p *Proxy) handleGenerateContent(w http.ResponseWriter, r *http.Request, mo
 		writeGeminiUpstreamError(w, err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if stream {
 		forwardGenerationStream(w, resp.Body)
 		return

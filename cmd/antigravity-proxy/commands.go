@@ -1,17 +1,19 @@
 package main
 
 import (
+	"antigravity-proxy/internal/apikey"
+	"antigravity-proxy/internal/config"
+	"antigravity-proxy/internal/oauth"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"strings"
 	"time"
-
-	"antigravity-proxy/internal/apikey"
-	"antigravity-proxy/internal/config"
-	"antigravity-proxy/internal/oauth"
 )
+
+func printLine(w io.Writer, a ...any)                  { _, _ = fmt.Fprintln(w, a...) }
+func printFormat(w io.Writer, format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
 
 func runLoginCommand(args []string, cfg config.Config, path string, output io.Writer) error {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
@@ -40,10 +42,10 @@ func runAccountsCommand(args []string, cfg config.Config, path string, output io
 	switch args[0] {
 	case "list":
 		if len(cfg.Accounts) == 0 {
-			fmt.Fprintln(output, "No accounts configured.")
+			printLine(output, "No accounts configured.")
 			return nil
 		}
-		fmt.Fprintln(output, "CONFIGURED ACCOUNTS:")
+		printLine(output, "CONFIGURED ACCOUNTS:")
 		for _, acc := range cfg.Accounts {
 			statusStr := "enabled"
 			if !acc.Enabled {
@@ -53,7 +55,7 @@ func runAccountsCommand(args []string, cfg config.Config, path string, output io
 			if email == "" {
 				email = "(not identified)"
 			}
-			fmt.Fprintf(output, "  • %-16s [%s] email: %-24s keys: %d\n", acc.ID, statusStr, email, len(acc.Keys))
+			printFormat(output, "  • %-16s [%s] email: %-24s keys: %d\n", acc.ID, statusStr, email, len(acc.Keys))
 		}
 		return nil
 
@@ -81,8 +83,8 @@ func runAccountsCommand(args []string, cfg config.Config, path string, output io
 		if !found {
 			return fmt.Errorf("account %q not found", targetID)
 		}
-		fmt.Fprintf(output, "Account %q %sd.\n", targetID, args[0])
-		fmt.Fprintln(output, "Note: If the proxy server is running, restart it to load configuration changes.")
+		printFormat(output, "Account %q %sd.\n", targetID, args[0])
+		printLine(output, "Note: If the proxy server is running, restart it to load configuration changes.")
 		return nil
 
 	case "remove":
@@ -112,8 +114,8 @@ func runAccountsCommand(args []string, cfg config.Config, path string, output io
 		if !found {
 			return fmt.Errorf("account %q not found", targetID)
 		}
-		fmt.Fprintf(output, "Account %q removed.\n", targetID)
-		fmt.Fprintln(output, "Note: If the proxy server is running, restart it to load configuration changes.")
+		printFormat(output, "Account %q removed.\n", targetID)
+		printLine(output, "Note: If the proxy server is running, restart it to load configuration changes.")
 		return nil
 
 	default:
@@ -143,17 +145,17 @@ func runKeysCommand(args []string, cfg config.Config, path string, output io.Wri
 			return fmt.Errorf("account %q not found", accountID)
 		}
 		if len(target.Keys) == 0 {
-			fmt.Fprintf(output, "No API keys configured for account %q.\n", accountID)
+			printFormat(output, "No API keys configured for account %q.\n", accountID)
 			return nil
 		}
-		fmt.Fprintf(output, "API KEYS FOR ACCOUNT %q:\n", accountID)
-		fmt.Fprintf(output, "  %-16s %-20s %-8s %s\n", "KEY ID", "LABEL", "LAST4", "CREATED (UTC)")
+		printFormat(output, "API KEYS FOR ACCOUNT %q:\n", accountID)
+		printFormat(output, "  %-16s %-20s %-8s %s\n", "KEY ID", "LABEL", "LAST4", "CREATED (UTC)")
 		for _, k := range target.Keys {
 			lbl := k.Label
 			if lbl == "" {
 				lbl = "-"
 			}
-			fmt.Fprintf(output, "  %-16s %-20s %-8s %s\n", k.ID, lbl, k.Last4, k.CreatedAt.Format(time.RFC3339))
+			printFormat(output, "  %-16s %-20s %-8s %s\n", k.ID, lbl, k.Last4, k.CreatedAt.Format(time.RFC3339))
 		}
 		return nil
 
@@ -204,14 +206,14 @@ func runKeysCommand(args []string, cfg config.Config, path string, output io.Wri
 			return err
 		}
 
-		fmt.Fprintf(output, "Created API key for account %q:\n", accountID)
-		fmt.Fprintf(output, "  Key:   %s\n", rawSecret)
-		fmt.Fprintf(output, "  ID:    %s\n", keyID)
+		printFormat(output, "Created API key for account %q:\n", accountID)
+		printFormat(output, "  Key:   %s\n", rawSecret)
+		printFormat(output, "  ID:    %s\n", keyID)
 		if keyObj.Label != "" {
-			fmt.Fprintf(output, "  Label: %s\n", keyObj.Label)
+			printFormat(output, "  Label: %s\n", keyObj.Label)
 		}
-		fmt.Fprintln(output, "\nSave this secret key now - it cannot be displayed again.")
-		fmt.Fprintln(output, "Note: If the proxy server is running, restart it to load configuration changes.")
+		printLine(output, "\nSave this secret key now - it cannot be displayed again.")
+		printLine(output, "Note: If the proxy server is running, restart it to load configuration changes.")
 		return nil
 
 	case "revoke":
@@ -254,8 +256,8 @@ func runKeysCommand(args []string, cfg config.Config, path string, output io.Wri
 			return fmt.Errorf("key %q not found in account %q", keyID, accountID)
 		}
 
-		fmt.Fprintf(output, "Key %q revoked from account %q.\n", keyID, accountID)
-		fmt.Fprintln(output, "Note: If the proxy server is running, restart it to load configuration changes.")
+		printFormat(output, "Key %q revoked from account %q.\n", keyID, accountID)
+		printLine(output, "Note: If the proxy server is running, restart it to load configuration changes.")
 		return nil
 
 	default:
@@ -278,9 +280,9 @@ func runAdminKeyCommand(args []string, path string, output io.Writer) error {
 		return fmt.Errorf("save admin key: %w", err)
 	}
 
-	fmt.Fprintln(output, "Rotated admin API key:")
-	fmt.Fprintf(output, "  Key: %s\n\n", secret)
-	fmt.Fprintln(output, "Save this key now - it cannot be displayed again.")
-	fmt.Fprintln(output, "Note: If the proxy server is running, restart it to apply the new admin key.")
+	printLine(output, "Rotated admin API key:")
+	printFormat(output, "  Key: %s\n\n", secret)
+	printLine(output, "Save this key now - it cannot be displayed again.")
+	printLine(output, "Note: If the proxy server is running, restart it to apply the new admin key.")
 	return nil
 }

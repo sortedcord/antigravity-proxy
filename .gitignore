@@ -1,7 +1,16 @@
 /antigravity-proxy
 /antigravity-proxy.exe
+/bin/
+/dist/
 /.codegraph/
 *.test
 /coverage.out
 .env
+*.env
 .env.*
+!.env.example
+*.log
+*.jsonl
+*.lock
+__pycache__/
+*.pyc

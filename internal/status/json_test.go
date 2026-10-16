@@ -1,13 +1,12 @@
 package status
 
 import (
+	"antigravity-proxy/internal/httpjson"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"antigravity-proxy/internal/httpjson"
 )
 
 func TestWriteJSONPreservesLinksAndHeaders(t *testing.T) {

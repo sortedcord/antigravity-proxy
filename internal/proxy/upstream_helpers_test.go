@@ -1,12 +1,11 @@
 package proxy
 
 import (
+	"antigravity-proxy/internal/testutil"
 	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
-
-	"antigravity-proxy/internal/testutil"
 )
 
 func awaitSurface(t *testing.T, done <-chan struct{}) {

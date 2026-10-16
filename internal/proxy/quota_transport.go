@@ -1,10 +1,9 @@
 package proxy
 
 import (
+	"antigravity-proxy/internal/quota"
 	"context"
 	"net/http"
-
-	"antigravity-proxy/internal/quota"
 )
 
 // quotaProjectID only inspects the existing account cache. Native project

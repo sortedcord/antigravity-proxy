@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"antigravity-proxy/internal/config"
 	"bufio"
 	"bytes"
 	"context"
@@ -16,8 +17,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"antigravity-proxy/internal/config"
 )
 
 func generationTestProxy(endpoint string) *Proxy {

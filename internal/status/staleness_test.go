@@ -1,6 +1,8 @@
 package status
 
 import (
+	"antigravity-proxy/internal/config"
+	"antigravity-proxy/internal/quota"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -8,9 +10,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"antigravity-proxy/internal/config"
-	"antigravity-proxy/internal/quota"
 )
 
 func TestSnapshotStalenessUsesTwoIntervalsWithExactBoundaries(t *testing.T) {

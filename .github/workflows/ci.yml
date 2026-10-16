@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+      - development
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  code-quality:
+    name: Code Quality
+    uses: ./.github/workflows/code-quality.yml
+
+  security:
+    name: Security
+    uses: ./.github/workflows/security.yml
+
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate.yml
+
+  ci-required:
+    name: CI Required Gate
+    needs: [code-quality, security, validate]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Verify all required checks succeeded
+        run: |
+          if [ "${{ needs.code-quality.result }}" != "success" ]; then
+            echo "code-quality failed with: ${{ needs.code-quality.result }}" >&2
+            exit 1
+          fi
+          if [ "${{ needs.security.result }}" != "success" ]; then
+            echo "security failed with: ${{ needs.security.result }}" >&2
+            exit 1
+          fi
+          if [ "${{ needs.validate.result }}" != "success" ]; then
+            echo "validate failed with: ${{ needs.validate.result }}" >&2
+            exit 1
+          fi
+          echo "All required checks passed successfully."

@@ -1,12 +1,19 @@
-FROM golang:1.27.1-alpine AS build
+FROM golang:1.27.2-alpine AS build
 
 WORKDIR /src
 COPY go.mod ./
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
 
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/antigravity-proxy ./cmd/antigravity-proxy \
-    && mkdir -p /home/app/.config/antigravity-proxy /home/app/.local/share/antigravity-proxy
+# Local builds use the embedded development version; CI supplies source identity.
+ARG VERSION
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags="-s -w -X antigravity-proxy/internal/buildinfo.Version=${VERSION} -X antigravity-proxy/internal/buildinfo.Commit=${COMMIT} -X antigravity-proxy/internal/buildinfo.Date=${BUILD_DATE}" \
+    -o /out/antigravity-proxy ./cmd/antigravity-proxy \
+    && mkdir -p /home/app/.config/antigravity-proxy /home/app/.local/share/antigravity-proxy \
+    && chmod 0700 /home/app/.config/antigravity-proxy /home/app/.local/share/antigravity-proxy
 
 FROM scratch
 

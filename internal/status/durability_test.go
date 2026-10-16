@@ -1,6 +1,7 @@
 package status
 
 import (
+	"antigravity-proxy/internal/quota"
 	"context"
 	"errors"
 	"os"
@@ -9,8 +10,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"antigravity-proxy/internal/quota"
 )
 
 // syncFaultFile writes to the real history file and only intercepts Sync, so

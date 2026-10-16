@@ -1,6 +1,8 @@
 package oauth
 
 import (
+	"antigravity-proxy/internal/config"
+	"antigravity-proxy/internal/testutil"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -16,10 +18,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-
-	"antigravity-proxy/internal/testutil"
-
-	"antigravity-proxy/internal/config"
 )
 
 func oauthConfigHome(t *testing.T) string {

@@ -1,14 +1,13 @@
 package status
 
 import (
+	"antigravity-proxy/internal/quota"
 	"context"
 	"errors"
 	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
-
-	"antigravity-proxy/internal/quota"
 )
 
 func TestReloadedHistoryRemainsAvailableDuringFirstFetch(t *testing.T) {

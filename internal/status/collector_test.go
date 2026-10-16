@@ -1,6 +1,8 @@
 package status
 
 import (
+	"antigravity-proxy/internal/quota"
+	"antigravity-proxy/internal/testutil"
 	"context"
 	"errors"
 	"os"
@@ -11,10 +13,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"antigravity-proxy/internal/testutil"
-
-	"antigravity-proxy/internal/quota"
 )
 
 func awaitState(t *testing.T, c *Collector, check func(quota.Snapshot, bool, PollInfo) bool) {

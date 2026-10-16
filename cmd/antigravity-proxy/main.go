@@ -1,6 +1,9 @@
 package main
 
 import (
+	"antigravity-proxy/internal/buildinfo"
+	"antigravity-proxy/internal/config"
+	"antigravity-proxy/internal/proxy"
 	"context"
 	"errors"
 	"fmt"
@@ -14,9 +17,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"antigravity-proxy/internal/config"
-	"antigravity-proxy/internal/proxy"
 )
 
 func main() {
@@ -28,6 +28,13 @@ func main() {
 }
 
 func run(args []string, output io.Writer) error {
+	if len(args) > 0 && args[0] == "version" {
+		if len(args) != 1 {
+			return errors.New("usage: antigravity-proxy version")
+		}
+		_, err := fmt.Fprintln(output, buildinfo.Current())
+		return err
+	}
 	if len(args) > 0 && (args[0] == "help" || args[0] == "-h" || args[0] == "--help") {
 		variables := config.EnvironmentVariables()
 		defaults := map[string]any{
@@ -41,9 +48,8 @@ func run(args []string, output io.Writer) error {
 				variables[i] += fmt.Sprintf(" (default %v)", value)
 			}
 		}
-		fmt.Fprintf(output, "Antigravity Proxy\n\nUsage:\n  antigravity-proxy [serve]\n  antigravity-proxy login [--account ID] [--replace] [--issue-key LABEL]\n  antigravity-proxy accounts <list|enable|disable|remove> [ID]\n  antigravity-proxy keys <list|create|revoke> <ACCOUNT_ID> [KEY_ID] [--label LABEL]\n  antigravity-proxy admin-key rotate\n\nEnvironment:\n  %s\n", strings.Join(variables, "\n  "))
-
-		return nil
+		_, err := fmt.Fprintf(output, "Antigravity Proxy\n\nUsage:\n  antigravity-proxy [serve]\n  antigravity-proxy login [--account ID] [--replace] [--issue-key LABEL]\n  antigravity-proxy accounts <list|enable|disable|remove> [ID]\n  antigravity-proxy keys <list|create|revoke> <ACCOUNT_ID> [KEY_ID] [--label LABEL]\n  antigravity-proxy admin-key rotate\n\nEnvironment:\n  %s\n", strings.Join(variables, "\n  "))
+		return err
 	}
 	cfg, path, err := config.Load()
 	if err != nil {
@@ -79,7 +85,7 @@ func serve(cfg config.Config, configPath string) (err error) {
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	server, err := proxy.NewRuntime(ctx, cfg, configPath)
 	if err != nil {
 		return err
@@ -95,7 +101,8 @@ func serve(cfg config.Config, configPath string) (err error) {
 		IdleTimeout:       90 * time.Second,
 		// Keep write deadlines disabled because upstream requests can take several minutes.
 	}
-	slog.Info("Antigravity Proxy listening", "address", "http://"+address)
+	info := buildinfo.Current()
+	slog.Info("Antigravity Proxy listening", "address", "http://"+address, "version", info.Version, "commit", info.Commit, "date", info.Date)
 	slog.Info("Quota polling configured", "interval_seconds", cfg.QuotaPollIntervalSeconds, "history", cfg.QuotaHistoryPath)
 	served := make(chan error, 1)
 	go func() { served <- httpServer.Serve(listener) }()

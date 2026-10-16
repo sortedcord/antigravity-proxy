@@ -4,6 +4,9 @@
 package status
 
 import (
+	"antigravity-proxy/internal/config"
+	"antigravity-proxy/internal/lifecycle"
+	"antigravity-proxy/internal/quota"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,10 +18,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"antigravity-proxy/internal/config"
-	"antigravity-proxy/internal/lifecycle"
-	"antigravity-proxy/internal/quota"
 )
 
 // FetchFunc obtains one authoritative quota observation, respecting cancellation.

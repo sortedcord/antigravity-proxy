@@ -24,7 +24,7 @@ func (w *surfaceControllerWriter) SetWriteDeadline(deadline time.Time) error {
 	return nil
 }
 
-func (w *surfaceControllerWriter) FlushError() error { w.ResponseRecorder.Flush(); return w.flushErr }
+func (w *surfaceControllerWriter) FlushError() error { w.Flush(); return w.flushErr }
 
 func TestAccessWriterPreservesResponseController(t *testing.T) {
 	failure := errors.New("flush failure")

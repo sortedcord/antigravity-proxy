@@ -1,14 +1,13 @@
 package proxy
 
 import (
+	"antigravity-proxy/internal/config"
+	"antigravity-proxy/internal/oauth"
 	"context"
 	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"antigravity-proxy/internal/config"
-	"antigravity-proxy/internal/oauth"
 )
 
 // Proxy serves native Gemini requests and the raw Antigravity model catalog

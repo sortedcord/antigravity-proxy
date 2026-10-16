@@ -9,3 +9,4 @@
 !internal/
 !internal/**/
 !internal/**/*.go
+!internal/**/VERSION

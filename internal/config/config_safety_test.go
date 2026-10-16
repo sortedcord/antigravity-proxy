@@ -382,9 +382,10 @@ func TestLoadTokenEnvironmentOverrideClearsSavedIdentity(t *testing.T) {
 				t.Fatal("environment credentials inherited saved account attribution")
 			}
 			wantAccess, wantRefresh := "saved-access", "saved-refresh"
-			if test.env == "ANTIGRAVITY_ACCESS_TOKEN" {
+			switch test.env {
+			case "ANTIGRAVITY_ACCESS_TOKEN":
 				wantAccess = test.value
-			} else if test.env == "ANTIGRAVITY_REFRESH_TOKEN" {
+			case "ANTIGRAVITY_REFRESH_TOKEN":
 				wantRefresh = test.value
 			}
 			if cfg.AccessToken != wantAccess || cfg.RefreshToken != wantRefresh {
