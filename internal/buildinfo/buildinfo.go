@@ -3,9 +3,9 @@ package buildinfo
 
 import (
 	_ "embed"
-	"fmt"
 	"runtime/debug"
-	"strings"
+
+	libbuild "github.com/terastal-hq/proxylib/buildinfo"
 )
 
 //go:embed VERSION
@@ -32,46 +32,14 @@ func Current() Info {
 }
 
 func resolve(build *debug.BuildInfo) Info {
-	info := Info{Version: Version, Commit: Commit, Date: Date}
-	if info.Version == "" {
-		v := strings.TrimSpace(baseVersion)
-		if !strings.HasPrefix(v, "v") {
-			v = "v" + v
-		}
-		info.Version = v + "-dev"
-		if build != nil && build.Main.Version != "" && build.Main.Version != "(devel)" {
-			info.Version = build.Main.Version
-		}
+	res := libbuild.Resolve(baseVersion, Version, Commit, Date, build)
+	return Info{
+		Version: res.Version,
+		Commit:  res.Commit,
+		Date:    res.Date,
 	}
-	dirty := false
-	if build != nil {
-		for _, setting := range build.Settings {
-			switch setting.Key {
-			case "vcs.revision":
-				if info.Commit == "" {
-					info.Commit = setting.Value
-				}
-			case "vcs.modified":
-				dirty = setting.Value == "true"
-			case "vcs.time":
-				if info.Date == "" {
-					info.Date = setting.Value
-				}
-			}
-		}
-	}
-	if info.Commit == "" {
-		info.Commit = "unknown"
-	}
-	if dirty && Commit == "" && info.Commit != "unknown" {
-		info.Commit += "-dirty"
-	}
-	if info.Date == "" {
-		info.Date = "unknown"
-	}
-	return info
 }
 
 func (i Info) String() string {
-	return fmt.Sprintf("antigravity-proxy %s (commit=%s, date=%s)", i.Version, i.Commit, i.Date)
+	return libbuild.Info{Version: i.Version, Commit: i.Commit, Date: i.Date}.Format("antigravity-proxy")
 }

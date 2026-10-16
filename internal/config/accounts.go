@@ -7,11 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
-	"slices"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/terastal-hq/proxylib/accountid"
 )
 
 // ErrUnloadableConfig means an account update was rejected because the resulting
@@ -28,8 +27,6 @@ func (acc *Account) ApplyCredentials(creds Credentials) {
 	acc.AccountEmail = creds.AccountEmail
 	acc.AccountName = creds.AccountName
 }
-
-var accountIDRegex = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$|^[a-z0-9]$`)
 
 // AccountKey represents an API key owned by an account.
 type AccountKey struct {
@@ -64,54 +61,12 @@ func (a Account) HasCredentials() bool {
 // ValidateAccountID checks whether id satisfies the account slug requirements:
 // 1-32 characters, lowercase alphanumeric and hyphens, starting and ending with alphanumeric.
 func ValidateAccountID(id string) error {
-	if len(id) == 0 {
-		return fmt.Errorf("account ID must not be empty")
-	}
-	if len(id) > 32 {
-		return fmt.Errorf("account ID %q exceeds maximum length of 32 characters", id)
-	}
-	if !accountIDRegex.MatchString(id) {
-		return fmt.Errorf("account ID %q must contain only lowercase letters, numbers, and internal hyphens", id)
-	}
-	return nil
+	return accountid.Validate(id)
 }
 
 // DeriveAccountID generates a unique, valid account slug from an email address.
 func DeriveAccountID(email string, existingIDs []string) string {
-	parts := strings.Split(email, "@")
-	raw := strings.ToLower(strings.TrimSpace(parts[0]))
-
-	var sb strings.Builder
-	for _, r := range raw {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			sb.WriteRune(r)
-		} else {
-			sb.WriteRune('-')
-		}
-	}
-	slug := strings.Trim(sb.String(), "-")
-	for strings.Contains(slug, "--") {
-		slug = strings.ReplaceAll(slug, "--", "-")
-	}
-	if slug == "" {
-		slug = "account"
-	}
-	if len(slug) > 28 {
-		slug = strings.TrimRight(slug[:28], "-")
-	}
-
-	candidate := slug
-	counter := 2
-	for slices.Contains(existingIDs, candidate) {
-		suffix := "-" + strconv.Itoa(counter)
-		if len(slug)+len(suffix) > 32 {
-			candidate = strings.TrimRight(slug[:32-len(suffix)], "-") + suffix
-		} else {
-			candidate = slug + suffix
-		}
-		counter++
-	}
-	return candidate
+	return accountid.Derive(email, existingIDs)
 }
 
 // ValidateAccounts validates a collection of accounts for uniqueness and key integrity.

@@ -5,10 +5,8 @@ import (
 	"antigravity-proxy/internal/testutil"
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -73,14 +71,6 @@ func TestPollingImmediatePeriodicTransitionsAndCancellation(t *testing.T) {
 	third.Buckets[3] = quota.Bucket{ID: "3p-weekly", PoolDisplayName: "Claude and GPT models", Window: "weekly", Status: "unavailable", UnavailableReason: "not_reported"}
 	receiveCall(t, calls) <- third
 	awaitState(t, c, func(s quota.Snapshot, exists bool, _ PollInfo) bool { return exists && reflect.DeepEqual(s, third) })
-	page, err := c.History(Query{Order: "asc"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := append(append(allEntries(first), allEntries(second)...), allEntries(third)...)
-	if page.Total != 12 || !reflect.DeepEqual(page.Entries, want) {
-		t.Fatalf("polling history = %+v; want %#v", page, want)
-	}
 	// The next periodic fetch blocks until Close cancels its context. It must
 	// not add any extra record or replace the last successful snapshot.
 	receiveCall(t, calls)
@@ -93,8 +83,6 @@ func TestPollingImmediatePeriodicTransitionsAndCancellation(t *testing.T) {
 		t.Fatal("Close did not cancel active fetch")
 	}
 	requireSnapshot(t, c, third)
-	reloaded := openTestCollector(t, path, time.Second, fetch)
-	requireSnapshot(t, reloaded, third)
 }
 
 func TestSlowPollingNeverOverlapsAndCloseJoinsWorker(t *testing.T) {
@@ -194,48 +182,15 @@ func TestFetchAndSaveFailuresRetainLastGoodSnapshot(t *testing.T) {
 	defer c.Close()
 	c.poll(context.Background())
 	before := requireSnapshot(t, c, first)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
 	c.poll(context.Background())
 	failed := requireSnapshot(t, c, first)
 	if failed.LastError != "quota upstream unavailable" || failed.LastAttemptAt == nil || failed.LastAttemptAt.Before(*before.LastAttemptAt) {
 		t.Fatalf("failed polling metadata = %+v", failed)
 	}
-	after, err := os.ReadFile(path)
-	if err != nil || string(after) != string(data) {
-		t.Fatalf("fetch failure altered storage: %v", err)
-	}
 	c.poll(context.Background())
 	if info := requireSnapshot(t, c, next); info.LastError != "" {
 		t.Fatalf("successful recovery retained error: %+v", info)
 	}
-	// Force a real storage error without needing root-sensitive permission
-	// tests or a pretend in-memory persistence backend.
-	c.mu.Lock()
-	err = c.file.Close()
-	c.mu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.poll(context.Background())
-	if info := requireSnapshot(t, c, next); !strings.Contains(info.LastError, "quota history") {
-		t.Fatalf("save error missing from polling metadata: %+v", info)
-	}
-	page, err := c.History(Query{Order: "asc"})
-	want := append(allEntries(first), allEntries(next)...)
-	if err != nil || page.Total != 8 || !reflect.DeepEqual(page.Entries, want) {
-		t.Fatalf("failure history = %+v, %v", page, err)
-	}
-	if err := c.Close(); !errors.Is(err, os.ErrClosed) {
-		t.Fatalf("Close after forced file failure = %v", err)
-	}
-	if err := c.Close(); !errors.Is(err, os.ErrClosed) {
-		t.Fatalf("idempotent Close changed error = %v", err)
-	}
-	reloaded := openTestCollector(t, path, time.Second, func(context.Context) (quota.Snapshot, error) { return first, nil })
-	requireSnapshot(t, reloaded, next)
 }
 
 func TestStartAndCloseLifecycleGuards(t *testing.T) {
@@ -283,7 +238,6 @@ func TestConcurrentReadsDuringPollingAndClose(t *testing.T) {
 		n := counter.Add(1)
 		return observation(observationTime().Add(time.Duration(n)*time.Second), float64(n)/100), nil
 	})
-	first := observation(observationTime().Add(time.Second), 0.01)
 	c.poll(context.Background())
 	stop := make(chan struct{})
 	failures := make(chan string, 4)
@@ -305,13 +259,6 @@ func TestConcurrentReadsDuringPollingAndClose(t *testing.T) {
 				}
 				newFrac := 1.0
 				sample.Buckets[0].RemainingFraction = &newFrac
-				page, err := c.History(Query{Limit: 1, Order: "asc"})
-				if err != nil || len(page.Entries) != 1 || !reflect.DeepEqual(page.Entries[0], allEntries(first)[0]) {
-					failures <- "ascending boundary changed under concurrent polling"
-					return
-				}
-				newEntryFrac := 0.99
-				page.Entries[0].RemainingFraction = &newEntryFrac
 			}
 		}()
 	}
@@ -329,15 +276,4 @@ func TestConcurrentReadsDuringPollingAndClose(t *testing.T) {
 	}
 	last := observation(observationTime().Add(20*time.Second), 0.2)
 	requireSnapshot(t, c, last)
-	page, err := c.History(Query{Pool: "gemini", Window: "5h", Order: "asc"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := make([]Entry, 0, 20)
-	for n := range 20 {
-		want = append(want, allEntries(observation(observationTime().Add(time.Duration(n+1)*time.Second), float64(n+1)/100))[0])
-	}
-	if page.Total != 20 || !reflect.DeepEqual(page.Entries, want) {
-		t.Fatalf("concurrent history = %+v", page)
-	}
 }

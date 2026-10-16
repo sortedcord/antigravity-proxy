@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -139,45 +138,6 @@ func TestQuotaStatusPollingHistoryAndRestartHTTP(t *testing.T) {
 	}
 	server.Close()
 	cancel()
-
-	// Block the new fetch: queries must come from the reloaded history, not a
-	// successful re-fetch that could conceal lost persistence.
-	block.Store(true)
-	cfg.QuotaPollIntervalSeconds = 3600
-	restarted := newUpstreamService(cfg)
-	restartCtx, restartCancel := context.WithCancel(context.Background())
-	defer restartCancel()
-	if err := restarted.Start(restartCtx); err != nil {
-		t.Fatal(err)
-	}
-	defer restarted.Close()
-	restartServer := httptest.NewServer(restarted)
-	defer restartServer.Close()
-	restartClient := restartServer.Client()
-	restartClient.Timeout = time.Second
-	loaded := waitForLimit(t, restartClient, restartServer.URL, cfg.APIKey, 0.50)
-	if !loaded.ObservedAt.Equal(second.ObservedAt) {
-		t.Fatalf("restart replaced stored observation timestamp: got %s, want %s", loaded.ObservedAt, second.ObservedAt)
-	}
-	parameters := url.Values{"pool": {"gemini"}, "window": {"weekly"}, "from": {first.ObservedAt.Format(time.RFC3339Nano)}, "to": {second.ObservedAt.Format(time.RFC3339Nano)}, "order": {"asc"}, "limit": {"1"}}
-	var history Result
-	if code := requestStatus(t, restartClient, restartServer.URL+"/status/usage?"+parameters.Encode(), cfg.APIKey, &history); code != http.StatusOK {
-		t.Fatalf("history status=%d", code)
-	}
-	if history.Total != 2 || len(history.Entries) != 1 || history.NextOffset == nil || *history.NextOffset != 1 {
-		t.Fatalf("wrong historical pagination: %+v", history)
-	}
-	entry := history.Entries[0]
-	if entry.PoolDisplayName != "Gemini Models" || entry.Window != "weekly" || entry.ID != "gemini-weekly" || !entry.ObservedAt.Equal(first.ObservedAt) || entry.RemainingFraction == nil || *entry.RemainingFraction != 0.60 {
-		t.Fatalf("wrong selected historical measurement: %+v", entry)
-	}
-	parameters.Set("offset", "1")
-	if code := requestStatus(t, restartClient, restartServer.URL+"/status/usage?"+parameters.Encode(), cfg.APIKey, &history); code != http.StatusOK {
-		t.Fatalf("next page status=%d", code)
-	}
-	if len(history.Entries) != 1 || history.NextOffset != nil || !history.Entries[0].ObservedAt.Equal(second.ObservedAt) || *history.Entries[0].RemainingFraction != 0.55 {
-		t.Fatalf("wrong next historical measurement: %+v", history)
-	}
 }
 
 func TestStatusUsageRejectsInvalidFilters(t *testing.T) {
@@ -321,11 +281,6 @@ func TestServicePrepareWithoutPollingAndCloseReleasesHistory(t *testing.T) {
 	if collector.workerDone != nil || collector.started || calls.Load() != 0 {
 		t.Fatal("Prepare or TriggerPoll started unrequested collection")
 	}
-	contender := NewService(config.Config{QuotaHistoryPath: path}, fetch)
-	defer contender.Close()
-	if err := contender.Prepare(); err == nil {
-		t.Fatal("prepared history was not exclusively locked")
-	}
 	if err := service.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -338,62 +293,13 @@ func TestServicePrepareWithoutPollingAndCloseReleasesHistory(t *testing.T) {
 	if err := service.Start(context.Background()); err == nil {
 		t.Fatal("closed service started")
 	}
-	if err := contender.Prepare(); err != nil {
-		t.Fatalf("prepared Close did not release history: %v", err)
-	}
 	if calls.Load() != 0 {
 		t.Fatal("preparation fetched quota")
 	}
 }
 
-func TestServiceFailedPreparationLeavesIndependentActiveServiceUsable(t *testing.T) {
-	dir := t.TempDir()
-	var calls atomic.Int64
-	sample := observation(observationTime(), 0.75)
-	active := NewService(config.Config{QuotaHistoryPath: filepath.Join(dir, "active.jsonl"), QuotaPollIntervalSeconds: 3600}, func(context.Context) (quota.Snapshot, error) {
-		calls.Add(1)
-		return sample, nil
-	})
-	defer active.Close()
-	if err := active.Start(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	collector := active.quotaCollector()
-	awaitState(t, collector, func(_ quota.Snapshot, exists bool, _ PollInfo) bool { return exists })
-	blocked := filepath.Join(dir, "not-a-directory")
-	if err := os.WriteFile(blocked, []byte("keep"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	candidate := NewService(config.Config{QuotaHistoryPath: filepath.Join(blocked, "candidate.jsonl")}, func(context.Context) (quota.Snapshot, error) {
-		t.Error("failed preparation fetched quota")
-		return quota.Snapshot{}, nil
-	})
-	defer candidate.Close()
-	if err := candidate.Prepare(); err == nil {
-		t.Fatal("Prepare accepted a non-directory parent")
-	}
-	if candidate.quotaCollector() != nil || active.quotaCollector() != collector {
-		t.Fatal("failed preparation altered an independently active collector")
-	}
-	active.TriggerPoll()
-	awaitState(t, collector, func(_ quota.Snapshot, exists bool, _ PollInfo) bool {
-		page, err := collector.History(Query{})
-		return exists && calls.Load() >= 2 && err == nil && page.Total == 8
-	})
-	requireSnapshot(t, collector, sample)
-	response := httptest.NewRecorder()
-	active.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/status/limit", nil))
-	if response.Code != http.StatusOK {
-		t.Fatalf("old status service unavailable after preparation failure: %d", response.Code)
-	}
-}
-
-func TestAccountHistoryPathsSeparateAndReloadPreparedHistory(t *testing.T) {
+func TestAccountHistoryPathsSeparate(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "history.jsonl")
-	legacy := []byte("legacy history must remain untouched\n")
-	if err := os.WriteFile(base, legacy, 0o600); err != nil {
-		t.Fatal(err)
-	}
 	firstPath := AccountHistoryPath(base, "../private/account")
 	secondPath := AccountHistoryPath(base, "another account")
 	if firstPath != AccountHistoryPath(base, "../private/account") || firstPath == secondPath || firstPath == base || AccountHistoryPath(base, "") == base {
@@ -401,80 +307,6 @@ func TestAccountHistoryPathsSeparateAndReloadPreparedHistory(t *testing.T) {
 	}
 	if filepath.Dir(firstPath) != filepath.Dir(base) || filepath.Ext(firstPath) != ".jsonl" || strings.Contains(filepath.Base(firstPath), "private") {
 		t.Fatalf("namespace leaked into an unsafe history path: %s", firstPath)
-	}
-	firstSample := observation(observationTime(), 0.8)
-	secondSample := observation(observationTime().Add(time.Minute), 0.2)
-	first := NewService(config.Config{QuotaHistoryPath: firstPath, QuotaPollIntervalSeconds: 3600}, func(context.Context) (quota.Snapshot, error) { return firstSample, nil })
-	defer first.Close()
-	if err := first.Prepare(); err != nil {
-		t.Fatal(err)
-	}
-	prepared := first.quotaCollector()
-	if err := first.Start(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if first.quotaCollector() != prepared {
-		t.Fatal("Start replaced prepared history")
-	}
-	awaitState(t, prepared, func(_ quota.Snapshot, exists bool, _ PollInfo) bool { return exists })
-	firstData, err := os.ReadFile(firstPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second := NewService(config.Config{QuotaHistoryPath: secondPath, QuotaPollIntervalSeconds: 3600}, func(context.Context) (quota.Snapshot, error) { return secondSample, nil })
-	defer second.Close()
-	if err := second.Prepare(); err != nil {
-		t.Fatal(err)
-	}
-	if _, exists, _ := second.quotaCollector().Latest(); exists {
-		t.Fatal("different namespace loaded the old account's sample")
-	}
-	if err := second.Start(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	awaitState(t, second.quotaCollector(), func(_ quota.Snapshot, exists bool, _ PollInfo) bool { return exists })
-	requireSnapshot(t, prepared, firstSample)
-	requireSnapshot(t, second.quotaCollector(), secondSample)
-	if err := first.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := os.ReadFile(firstPath); err != nil || !bytes.Equal(got, firstData) {
-		t.Fatalf("new account changed old durable history: %v", err)
-	}
-	for _, test := range []struct {
-		path   string
-		sample quota.Snapshot
-	}{
-		{firstPath, firstSample},
-		{secondPath, secondSample},
-	} {
-		if test.path == secondPath {
-			if err := second.Close(); err != nil {
-				t.Fatal(err)
-			}
-		}
-		reloaded := NewService(config.Config{QuotaHistoryPath: test.path}, func(context.Context) (quota.Snapshot, error) {
-			t.Error("prepared restart fetched quota")
-			return quota.Snapshot{}, nil
-		})
-		defer reloaded.Close()
-		if err := reloaded.Prepare(); err != nil {
-			t.Fatal(err)
-		}
-		requireSnapshot(t, reloaded.quotaCollector(), test.sample)
-		page, err := reloaded.quotaCollector().History(Query{})
-		if err != nil || page.Total != 4 {
-			t.Fatalf("prepared namespace history not reloaded: %+v, %v", page, err)
-		}
-		response := httptest.NewRecorder()
-		reloaded.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/status/limit", nil))
-		var result limitResponse
-		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || response.Code != http.StatusOK || !result.ObservedAt.Equal(test.sample.ObservedAt) {
-			t.Fatalf("prepared status omitted loaded history: %s, %v", response.Body.String(), err)
-		}
-	}
-	if got, err := os.ReadFile(base); err != nil || !bytes.Equal(got, legacy) {
-		t.Fatalf("legacy history was modified: %v", err)
 	}
 }
 

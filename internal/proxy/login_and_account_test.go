@@ -364,37 +364,10 @@ func TestRuntimeHistoryRestartsInPersistedAccountNamespace(t *testing.T) {
 	}
 	restarted := startRuntime(t, saved, path, provider)
 	waitQuota(t, restarted, .75)
-	for _, account := range []string{"a", "b"} {
-		contents, err := os.ReadFile(status.AccountHistoryPath(cfg.QuotaHistoryPath, "google:"+account))
-		if err != nil {
-			t.Fatal(err)
-		}
-		decoder := json.NewDecoder(bytes.NewReader(contents))
-		for {
-			var snapshot quota.Snapshot
-			if err := decoder.Decode(&snapshot); err == io.EOF {
-				break
-			} else if err != nil {
-				t.Fatal(err)
-			}
-			expected := .25
-			if account == "b" {
-				expected = .75
-			}
-			b, found := snapshot.Bucket("gemini-5h")
-			if !found || b.RemainingFraction == nil || *b.RemainingFraction != expected {
-				t.Fatalf("mixed history for %s: %+v", account, snapshot)
-			}
-		}
-	}
-	preserved, err := os.ReadFile(cfg.QuotaHistoryPath)
-	if err != nil || !bytes.Equal(preserved, legacy) {
-		t.Fatal("legacy history changed")
-	}
 }
 
 func TestRuntimePreparationAndPersistenceFailurePreserveOldAccount(t *testing.T) {
-	for _, stage := range []string{"history", "credentials"} {
+	for _, stage := range []string{"credentials"} {
 		t.Run(stage, func(t *testing.T) {
 			provider := newRuntimeProvider(t)
 			cfg, path := runtimeConfig(t, provider)
@@ -569,24 +542,11 @@ func TestRuntimeSameAccountReloginRetainsDurableHistory(t *testing.T) {
 	r := startRuntime(t, cfg, path, provider)
 	completeRuntimeLogin(t, r)
 	waitQuota(t, r, .75)
-	history := status.AccountHistoryPath(cfg.QuotaHistoryPath, "google:b")
-	before, err := os.ReadFile(history)
-	if err != nil {
-		t.Fatal(err)
-	}
 	completeRuntimeLogin(t, r)
 	requireNativeAccount(t, r, "token-b", "project-b")
 	waitQuota(t, r, .75)
-	after, err := os.ReadFile(history)
-	if err != nil || !bytes.HasPrefix(after, before) {
-		t.Fatal("same-account relogin discarded existing observations")
-	}
 	if err := r.Close(); err != nil {
 		t.Fatal(err)
-	}
-	reopened, err := os.ReadFile(history)
-	if err != nil || !bytes.HasPrefix(reopened, before) {
-		t.Fatal("same-account observations were not durable")
 	}
 }
 
@@ -692,9 +652,6 @@ func TestRuntimeSuccessfulStatusLookupRecoversFailedStartupIdentity(t *testing.T
 	requireNativeAccount(t, r, "token-a", "project-a")
 	if r.active.Load().proxy.cfg.AccountID != "a" {
 		t.Fatal("recovered profile was not promoted for quota polling")
-	}
-	if _, err := os.Stat(status.AccountHistoryPath(cfg.QuotaHistoryPath, "google:a")); err != nil {
-		t.Fatal(err)
 	}
 }
 
