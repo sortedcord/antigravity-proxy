@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: ['1.22.x', '1.27.1', 'stable']
+        go: ['1.22.x', '1.27.2', 'stable']
     steps:
       - name: Check out source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -39,13 +39,13 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.2'
           cache: false
       - name: Build executable
         run: ./scripts/build.sh
       - name: Verify build identity
         run: |
-          bin_path=$(ls bin/* | head -n 1)
+          bin_path=$(find bin -maxdepth 1 -type f | head -n 1)
           "$bin_path" version
 
   container:
@@ -71,7 +71,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.2'
           cache: false
       - name: Package snapshot archives
         run: ./scripts/ci/test-artifacts.sh
@@ -91,7 +91,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.2'
           cache: false
       - name: Run platform verification
         shell: bash
@@ -108,7 +108,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.2'
           cache: false
       - name: Run project checks
         run: ./scripts/ci/test-project.sh

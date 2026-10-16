@@ -76,9 +76,11 @@ jobs:
             v*) ;;
             *) base_version="v$base_version" ;;
           esac
-          echo "version=${base_version}-dev" >> "$GITHUB_OUTPUT"
-          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "date=$(git show -s --format=%cI HEAD)" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=${base_version}-dev"
+            echo "commit=$(git rev-parse HEAD)"
+            echo "date=$(git show -s --format=%cI HEAD)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'

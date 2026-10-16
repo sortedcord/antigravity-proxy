@@ -29,7 +29,7 @@ EXPECTED_PINS = {
     "docker/metadata-action": "c299e40c65443455700f0fdfc63efafe5b349051",
     "docker/login-action": "c94ce9fb468520275223c153574b00df6fe4bcc9",
     "docker/build-push-action": "10e90e3645eae34f1e60eeb005ba3a3d33f178e8",
-    "goreleaser/goreleaser-action": "90a305fe32ea55e12d9302e171b3127814b745ee",
+    "goreleaser/goreleaser-action": "e435ccd777264be153ace6237001ef4d979d3a7a",
     "googleapis/release-please-action": "a02a34c4d625f9be7cb89156071d8567266a2445",
     "anchore/sbom-action": "df80a981bc6edbc4e220a492d3cbe9f5547a6e75",
     "actions/attest-build-provenance": "7668571508540a607bdfd90a87a560489fe372eb",

@@ -27,7 +27,7 @@ Pull request / branch push
       ├─ Code Quality (formatting, linting, coverage baseline >= 70%, scripts, docs)
       ├─ Security (secret scan, govulncheck)
       ├─ Validation
-      │   ├─ Go compatibility matrix (1.22.x, 1.27.1, stable)
+      │   ├─ Go compatibility matrix (1.22.x, 1.27.2, stable)
       │   ├─ Native build & executable identity verification
       │   ├─ Container build & hardened runtime smoke test
       │   ├─ Release archive snapshot packaging
@@ -58,7 +58,7 @@ Release PR merge (or manual v* tag push)
 ## Toolchain policy
 
 - **Module language compatibility**: Go `1.22` (specified in `go.mod`).
-- **Production compiler**: Go `1.27.1` (used in `Dockerfile` and release builds).
+- **Production compiler**: Go `1.27.2` (used in `Dockerfile` and release builds).
 - **Forward compatibility**: Go `stable` tested in matrix.
 - **Linters**: pinned `golangci-lint` v2.14.0.
 
