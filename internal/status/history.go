@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/terastal-hq/proxylib/poller"
 )
 
 // Query selects observation times inclusively and pages flattened quota buckets.
@@ -57,7 +59,7 @@ func (c *Collector) History(query Query) (Result, error) {
 	}
 	result := Result{
 		Entries: make([]Entry, 0), Limit: query.Limit, Offset: query.Offset,
-		Order: query.Order, From: cloneTime(query.From), To: cloneTime(query.To),
+		Order: query.Order, From: poller.CloneTime(query.From), To: poller.CloneTime(query.To),
 		Pool: query.Pool, Window: query.Window,
 	}
 	return result, nil

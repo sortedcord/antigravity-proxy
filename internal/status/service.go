@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/terastal-hq/proxylib/poller"
 )
 
 // Service owns account-scoped polling and its HTTP status API. Construct it,
@@ -197,13 +199,12 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // SnapshotStale determines whether an observation is stale based on the poll interval and errors.
 func SnapshotStale(observedAt time.Time, interval time.Duration, lastError string, now time.Time) bool {
-	return snapshotStale(observedAt, interval, lastError, now)
+	return poller.IsStale(observedAt, interval, lastError, now)
 }
 
 // snapshotStale allows two full polling intervals for an observation to land.
-// Adding the intervals separately avoids overflowing a doubled Duration.
 func snapshotStale(observedAt time.Time, interval time.Duration, lastError string, now time.Time) bool {
-	return lastError != "" || now.After(observedAt.Add(interval).Add(interval))
+	return poller.IsStale(observedAt, interval, lastError, now)
 }
 
 func parseUsageQuery(raw string) (Query, error) {

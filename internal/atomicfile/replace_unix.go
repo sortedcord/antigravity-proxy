@@ -1,21 +1,17 @@
 //go:build !windows
 
-// Package atomicfile supplies the platform durability boundaries shared by
-// credential replacement and quota-history compaction. Callers own staging,
-// permissions, locks and the policy for errors after replacement commits.
 package atomicfile
 
-import "os"
+import (
+	"os"
 
-// Replace atomically replaces a same-directory target. SyncDir must follow it
-// after the staged file has been flushed and closed.
+	"github.com/terastal-hq/proxylib/privatefile"
+)
+
+// Replace atomically replaces a same-directory target.
 func Replace(from, to string) error { return os.Rename(from, to) }
 
+// SyncDir flushes directory entries to disk.
 func SyncDir(path string) error {
-	dir, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = dir.Close() }()
-	return dir.Sync()
+	return privatefile.SyncDir(path)
 }

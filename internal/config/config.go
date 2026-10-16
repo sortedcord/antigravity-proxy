@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/terastal-hq/proxylib/privatefile"
 )
 
 const (
@@ -491,31 +493,7 @@ func readConfig(path string, cfg *Config) ([]byte, error) {
 // Check decoded keys before decoding into Config or a map: both would otherwise
 // silently overwrite aliases, and a later map serialization can change the winner.
 func rejectDuplicateConfigFields(data []byte) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	if _, err := decoder.Token(); err != nil {
-		return err
-	}
-	var keys []string
-	for decoder.More() {
-		token, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		key := token.(string)
-		for _, previous := range keys {
-			if strings.EqualFold(key, previous) {
-				return fmt.Errorf("duplicate case-insensitive top-level config fields")
-			}
-		}
-		keys = append(keys, key)
-		// Let encoding/json consume the complete value, including nested containers.
-		var value json.RawMessage
-		if err := decoder.Decode(&value); err != nil {
-			return err
-		}
-	}
-	_, err := decoder.Token()
-	return err
+	return privatefile.RejectDuplicateFields(data)
 }
 
 // UpdateCredentials rereads disk and replaces tokens, the OAuth pair, and account

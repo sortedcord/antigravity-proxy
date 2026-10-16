@@ -223,7 +223,7 @@ func TestStartAndCloseLifecycleGuards(t *testing.T) {
 		t.Fatal("duplicate Start succeeded")
 	}
 	select {
-	case <-other.workerDone:
+	case <-other.Done():
 	case <-time.After(3 * time.Second):
 		t.Fatal("pre-canceled worker did not exit")
 	}

@@ -4,18 +4,18 @@ import (
 	"antigravity-proxy/internal/apikey"
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/terastal-hq/proxylib/accountid"
+	"github.com/terastal-hq/proxylib/configfile"
 )
 
 // ErrUnloadableConfig means an account update was rejected because the resulting
 // configuration would fail the same validation Load applies at startup.
-var ErrUnloadableConfig = errors.New("change rejected: the resulting configuration would not load at startup")
+var ErrUnloadableConfig = configfile.ErrUnloadableConfig
 
 // ApplyCredentials updates an account's token, OAuth client, and Google account identity fields.
 func (acc *Account) ApplyCredentials(creds Credentials) {
@@ -113,20 +113,18 @@ func ValidateAccounts(accounts []Account) error {
 	return nil
 }
 
+var legacyCredentialKeys = []string{
+	"accessToken", "refreshToken", "oauthClientId", "oauthClientSecret",
+	"accountId", "accountEmail", "accountName", "apiKey",
+}
+
 // UpdateAccounts reads the configuration at path, applies update to the accounts,
 // validates the result, and durably persists it while stripping legacy flat credential fields.
 func UpdateAccounts(path string, update func(accounts *[]Account) error) error {
 	var disk Config
-	data, err := readConfig(path, &disk)
+	_, err := readConfig(path, &disk)
 	if err != nil {
 		return err
-	}
-
-	fields := make(map[string]json.RawMessage)
-	if len(data) != 0 {
-		if err := json.Unmarshal(data, &fields); err != nil {
-			return fmt.Errorf("read saved accounts: %w", err)
-		}
 	}
 
 	accounts := disk.Accounts
@@ -142,34 +140,17 @@ func UpdateAccounts(path string, update func(accounts *[]Account) error) error {
 		return fmt.Errorf("validate accounts: %w", err)
 	}
 
-	accountsJSON, err := json.MarshalIndent(accounts, "  ", "  ")
-	if err != nil {
-		return fmt.Errorf("encode accounts: %w", err)
-	}
-	fields["accounts"] = accountsJSON
-
-	// Strip legacy credential fields from disk on update
-	legacyKeys := []string{
-		"accessToken", "refreshToken", "oauthClientId", "oauthClientSecret",
-		"accountId", "accountEmail", "accountName", "apiKey",
-	}
-	for _, lk := range legacyKeys {
-		for key := range fields {
-			if strings.EqualFold(key, lk) {
-				delete(fields, key)
-			}
+	return configfile.Patch(path, func(fields map[string]json.RawMessage) error {
+		accountsJSON, err := json.MarshalIndent(accounts, "  ", "  ")
+		if err != nil {
+			return fmt.Errorf("encode accounts: %w", err)
 		}
-	}
-
-	outData, err := json.MarshalIndent(fields, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode config: %w", err)
-	}
-	if err := validateAsLoaded(outData); err != nil {
-		return fmt.Errorf("%w: %v", ErrUnloadableConfig, err)
-	}
-
-	return saveConfigBytes(path, outData)
+		fields["accounts"] = accountsJSON
+		configfile.StripKeys(fields, legacyCredentialKeys...)
+		return nil
+	}, func(candidate []byte) error {
+		return validateAsLoaded(candidate)
+	})
 }
 
 // validateAsLoaded checks data exactly as Load would at the next startup:

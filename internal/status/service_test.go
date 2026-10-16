@@ -278,7 +278,7 @@ func TestServicePrepareWithoutPollingAndCloseReleasesHistory(t *testing.T) {
 		t.Fatalf("repeated preparation replaced its collector: %v", err)
 	}
 	service.TriggerPoll()
-	if collector.workerDone != nil || collector.started || calls.Load() != 0 {
+	if calls.Load() != 0 {
 		t.Fatal("Prepare or TriggerPoll started unrequested collection")
 	}
 	if err := service.Close(); err != nil {
@@ -325,7 +325,7 @@ func TestServiceCanceledStartAndDuplicateStart(t *testing.T) {
 	if err := service.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	awaitStatusSignal(t, service.quotaCollector().workerDone, "canceled start did not stop its worker")
+	awaitStatusSignal(t, service.quotaCollector().Done(), "canceled start did not stop its worker")
 	if calls.Load() != 0 {
 		t.Fatal("already-canceled start fetched quota")
 	}
