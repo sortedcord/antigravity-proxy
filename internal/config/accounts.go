@@ -122,7 +122,7 @@ var legacyCredentialKeys = []string{
 // validates the result, and durably persists it while stripping legacy flat credential fields.
 func UpdateAccounts(path string, update func(accounts *[]Account) error) error {
 	var disk Config
-	_, err := readConfig(path, &disk)
+	data, err := readConfig(path, &disk)
 	if err != nil {
 		return err
 	}
@@ -140,7 +140,7 @@ func UpdateAccounts(path string, update func(accounts *[]Account) error) error {
 		return fmt.Errorf("validate accounts: %w", err)
 	}
 
-	return configfile.Patch(path, func(fields map[string]json.RawMessage) error {
+	return configfile.PatchWithData(path, data, func(fields map[string]json.RawMessage) error {
 		accountsJSON, err := json.MarshalIndent(accounts, "  ", "  ")
 		if err != nil {
 			return fmt.Errorf("encode accounts: %w", err)
